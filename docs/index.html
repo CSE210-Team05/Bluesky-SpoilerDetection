@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Operational dashboard for the Bluesky spoiler detection pipeline">
+    <title>Spoiler Pipeline</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Bluesky moderation telemetry</p>
+          <h1>Spoiler pipeline</h1>
+          <p class="subtitle">A compact view from ingestion to published label.</p>
+        </div>
+        <div class="freshness" aria-live="polite">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="freshness">Loading snapshot…</span>
+        </div>
+      </header>
+
+      <section aria-labelledby="flow-title">
+        <div class="section-heading">
+          <h2 id="flow-title">Throughput</h2>
+          <span id="window">—</span>
+        </div>
+        <div class="flow-grid">
+          <article class="rate-card">
+            <span class="step">01 · Reader</span>
+            <strong id="ingestion-rate">—</strong>
+            <span>posts ingested / sec</span>
+          </article>
+          <div class="flow-arrow" aria-hidden="true">→</div>
+          <article class="rate-card">
+            <span class="step">02 · Detectors</span>
+            <strong id="label-rate">—</strong>
+            <span>spoilers labeled / sec</span>
+          </article>
+          <div class="flow-arrow" aria-hidden="true">→</div>
+          <article class="rate-card">
+            <span class="step">03 · Publishers</span>
+            <strong id="publish-rate">—</strong>
+            <span>labels published / sec</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="details-grid">
+        <article class="panel" aria-labelledby="queues-title">
+          <div class="section-heading">
+            <h2 id="queues-title">Queue pressure</h2>
+            <span id="bottleneck" class="badge">Evaluating</span>
+          </div>
+          <div class="queue" id="post-queue">
+            <div>
+              <h3>Post queue</h3>
+              <p>Reader → detectors</p>
+            </div>
+            <strong class="queue-count" id="post-depth">—</strong>
+            <span class="queue-age" id="post-age">—</span>
+          </div>
+          <div class="queue" id="label-queue">
+            <div>
+              <h3>Label queue</h3>
+              <p>Detectors → publishers</p>
+            </div>
+            <strong class="queue-count" id="label-depth">—</strong>
+            <span class="queue-age" id="label-age">—</span>
+          </div>
+        </article>
+
+        <article class="panel" aria-labelledby="tags-title">
+          <div class="section-heading">
+            <h2 id="tags-title">Active spoiler tags</h2>
+            <span id="detector-version">—</span>
+          </div>
+          <div class="tags" id="tags"></div>
+          <p class="label-value">Published label: <code id="label-value">—</code></p>
+        </article>
+      </section>
+
+      <section class="panel totals" aria-labelledby="totals-title">
+        <div class="section-heading">
+          <h2 id="totals-title">Lifetime totals</h2>
+          <span>since the current databases were created</span>
+        </div>
+        <dl id="totals"></dl>
+      </section>
+
+      <p class="error" id="error" role="alert" hidden></p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,46 @@
+{
+  "databases": {
+    "labels": "data/labels.sqlite3",
+    "posts": "data/posts.sqlite3"
+  },
+  "detectors": {
+    "batch_size": 10,
+    "poll_seconds": 0.5,
+    "tag_config": "config/spoiler_tags.json",
+    "workers": 2
+  },
+  "metrics": {
+    "branch": "main",
+    "enabled": true,
+    "path": "docs/metrics.json",
+    "publish_interval_seconds": 300,
+    "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
+    "tag_config": "config/spoiler_tags.json",
+    "token_env": "GITHUB_METRICS_TOKEN",
+    "window_seconds": 300
+  },
+  "publishers": {
+    "batch_size": 10,
+    "dry_run": true,
+    "poll_seconds": 0.5,
+    "workers": 1
+  },
+  "reader": {
+    "collection": "app.bsky.feed.post",
+    "enabled": true,
+    "endpoint": "wss://jetstream2.us-west.bsky.network/subscribe",
+    "input": null,
+    "max_events": null,
+    "max_message_bytes": 4194304,
+    "open_timeout": 10,
+    "ping_interval": 20,
+    "ping_timeout": 20,
+    "stream_id": "jetstream2-us-west-posts-v1"
+  },
+  "supervision": {
+    "max_restarts": 5,
+    "poll_seconds": 0.5,
+    "restart_delay_seconds": 1.0,
+    "shutdown_timeout_seconds": 5.0
+  }
+}

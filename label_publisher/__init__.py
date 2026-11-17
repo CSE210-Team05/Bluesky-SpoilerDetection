@@ -1,0 +1,2 @@
+"""Bluesky label publication workers."""
+

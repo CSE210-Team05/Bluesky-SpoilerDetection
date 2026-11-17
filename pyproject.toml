@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bluesky-spoiler-detection"
+version = "0.1.0"
+description = "Queue-based Bluesky spoiler detection pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=16,<18",
+]
+
+[project.scripts]
+spoiler-pipeline = "coordinator:main"
+
+[tool.setuptools]
+py-modules = ["coordinator"]
+
+[tool.setuptools.packages.find]
+include = [
+    "Bluesky_interface*",
+    "label_publisher*",
+    "metrics*",
+    "spoiler_interface*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

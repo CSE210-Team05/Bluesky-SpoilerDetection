@@ -1,0 +1,48 @@
+{
+  "configuration": {
+    "detector_version": "keyword-v1",
+    "label_value": "spoiler",
+    "tags": [
+      "spoiler"
+    ]
+  },
+  "generated_at": "2026-11-17T00:00:00+00:00",
+  "queues": {
+    "labels": {
+      "available": 0,
+      "dead": 0,
+      "leased": 0,
+      "oldest_job_age_seconds": null
+    },
+    "posts": {
+      "available": 0,
+      "dead": 0,
+      "leased": 0,
+      "oldest_job_age_seconds": null
+    }
+  },
+  "rates": {
+    "detection_per_second": 0.0,
+    "ingestion_per_second": 0.0,
+    "label_per_second": 0.0,
+    "publish_per_second": 0.0
+  },
+  "stream": {
+    "connected": false,
+    "id": null,
+    "invalid_total": 0,
+    "last_event_age_seconds": null,
+    "received_total": 0,
+    "reconnect_total": 0
+  },
+  "totals": {
+    "dead_lettered": 0,
+    "detected": 0,
+    "detection_retries": 0,
+    "ingested": 0,
+    "labels_enqueued": 0,
+    "publication_retries": 0,
+    "published": 0
+  },
+  "window_seconds": 60
+}

@@ -1,0 +1,2 @@
+"""Operational metrics snapshot generation."""
+

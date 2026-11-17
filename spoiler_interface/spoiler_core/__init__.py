@@ -1,0 +1,1 @@
+"""Private spoiler detector implementation."""
