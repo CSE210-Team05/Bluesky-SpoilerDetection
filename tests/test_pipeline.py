@@ -982,3 +982,15 @@ def test_rendered_documentation_has_a_public_deployment() -> None:
     assert "rendered documentation from `main`" in readme
     assert site_url in readme
     assert f"site_url: {site_url}" in mkdocs
+
+
+def test_agent_guide_is_discoverable_and_tracks_core_contracts() -> None:
+    guide = Path("AGENTS.md").read_text(encoding="utf-8")
+    contributing = Path("CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    assert "[`AGENTS.md`](AGENTS.md)" in contributing
+    assert "Detector throughput" in guide
+    assert "Publisher traversal" in guide
+    assert "config/performance.json" in guide
+    assert 'python -m pytest -m "not e2e and not performance"' in guide
+    assert "Required quality gate" in guide

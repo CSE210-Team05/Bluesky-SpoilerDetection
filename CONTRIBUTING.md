@@ -4,6 +4,11 @@ Thank you for contributing to the Bluesky Spoiler Detection project!
 
 To maintain a consistent and readable Git history, all contributors should follow the [Conventional Commits 1.0.0 specification](https://www.conventionalcommits.org/en/v1.0.0/).
 
+Developers and coding agents should read [`AGENTS.md`](AGENTS.md) before making
+changes. It records the repository's component ownership, delivery invariants,
+metric definitions, quality gates, and operational constraints. Update it in
+the same pull request whenever those contracts change.
+
 ## Commit Message Format
 
 All commit messages should follow this structure:
