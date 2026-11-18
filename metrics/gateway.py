@@ -36,10 +36,29 @@ from spoiler_interface.spoiler_interface import LabelQueue
 
 API_VERSION = "2022-11-28"
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 class LeaseUnavailable(RuntimeError):
     """Raised when another coordinator owns the public metrics endpoint."""
+
+
+def load_or_create_instance_id(path: Path) -> str:
+    """Return a durable ID so this installation can reclaim its own stale lease."""
+    try:
+        instance_id = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        instance_id = uuid4().hex
+        try:
+            with path.open("x", encoding="utf-8") as destination:
+                destination.write(f"{instance_id}\n")
+        except FileExistsError:
+            return load_or_create_instance_id(path)
+
+    if INSTANCE_ID_PATTERN.fullmatch(instance_id) is None:
+        raise RuntimeError(f"metrics instance ID file is invalid: {path}")
+    return instance_id
 
 
 class GitHubEndpointRegistry:
@@ -427,7 +446,10 @@ def run_gateway(args: argparse.Namespace) -> int:
     if not token:
         raise RuntimeError(f"environment variable {args.token_env} is not set")
 
-    instance_id = uuid4().hex
+    instance_id_path = args.instance_id_file or (
+        args.post_database.parent / ".metrics-instance-id"
+    )
+    instance_id = load_or_create_instance_id(instance_id_path)
     snapshot_provider = SnapshotProvider(
         args.post_database,
         args.label_database,
@@ -461,9 +483,12 @@ def run_gateway(args: argparse.Namespace) -> int:
     def request_stop(_signum: int, _frame: object) -> None:
         stop_requested.set()
 
+    stop_signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        stop_signals.append(signal.SIGBREAK)
     previous_handlers = {
         signum: signal.signal(signum, request_stop)
-        for signum in (signal.SIGINT, signal.SIGTERM)
+        for signum in stop_signals
     }
     server_thread: threading.Thread | None = None
     lease_acquired = False
@@ -520,6 +545,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry-branch", default="live-metrics-endpoint-registry")
     parser.add_argument("--registry-source-branch", default="main")
     parser.add_argument("--token-env", default="GITHUB_METRICS_TOKEN")
+    parser.add_argument(
+        "--instance-id-file",
+        type=Path,
+        help="durable local lease owner ID (defaults beside the post database)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--allowed-origin", required=True)

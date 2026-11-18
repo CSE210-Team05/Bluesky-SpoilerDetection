@@ -21,6 +21,7 @@ from metrics.gateway import (
     LeaseUnavailable,
     LiveRateTracker,
     MetricsHTTPServer,
+    load_or_create_instance_id,
 )
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_core.spoiler_detector import (
@@ -317,6 +318,47 @@ def test_metrics_registry_refuses_an_active_owner() -> None:
 
     with pytest.raises(LeaseUnavailable, match="already claimed"):
         registry.acquire("instance-b")
+
+
+def test_metrics_registry_allows_same_installation_to_reclaim_stale_lease() -> None:
+    requests = []
+    endpoint = {
+        "state": "active",
+        "instance_id": "instance-a",
+        "public_url": "https://stale.trycloudflare.com",
+    }
+
+    def opener(request, *, timeout):
+        requests.append(request)
+        if "/git/refs/heads/live-metrics-endpoint-registry" in request.full_url:
+            return BytesIO(b'{"object":{"sha":"branch-sha"}}')
+        if request.method == "GET":
+            encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
+            return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
+        return BytesIO(b'{"content":{"sha":"new-sha"}}')
+
+    registry = GitHubEndpointRegistry(
+        repository="owner/repository",
+        path="docs/metrics-endpoint.json",
+        branch="live-metrics-endpoint-registry",
+        source_branch="main",
+        token="secret",
+        opener=opener,
+    )
+
+    assert registry.acquire("instance-a") == "new-sha"
+    update = json.loads(requests[-1].data)
+    assert update["sha"] == "old-sha"
+
+
+def test_metrics_instance_id_survives_restart(tmp_path: Path) -> None:
+    instance_id_file = tmp_path / ".metrics-instance-id"
+
+    first = load_or_create_instance_id(instance_id_file)
+    second = load_or_create_instance_id(instance_id_file)
+
+    assert first == second
+    assert len(first) == 32
 
 
 def test_metrics_http_port_disallows_socket_reuse() -> None:

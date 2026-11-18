@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -255,7 +256,14 @@ class Coordinator:
         self.stop_requested = True
 
     def _start(self, spec: ComponentSpec) -> None:
-        process = subprocess.Popen(spec.command, cwd=PROJECT_ROOT)
+        creationflags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        )
+        process = subprocess.Popen(
+            spec.command,
+            cwd=PROJECT_ROOT,
+            creationflags=creationflags,
+        )
         self.processes[spec.name] = process
         print(f"[coordinator] started {spec.name} pid={process.pid}", flush=True)
 
@@ -362,7 +370,10 @@ class Coordinator:
     def shutdown(self) -> None:
         running = [process for process in self.processes.values() if process.poll() is None]
         for process in running:
-            process.terminate()
+            if os.name == "nt":
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                process.terminate()
 
         deadline = time.monotonic() + self.settings.shutdown_timeout_seconds
         for process in running:

@@ -14,6 +14,15 @@ a real AT Protocol labeling client and credentials are configured.
 
 ## Try the pipeline locally
 
+Install the Python package and all development/test dependencies:
+
+```shell
+python -m pip install -r requirements.txt
+```
+
+The live metrics tunnel also uses the external `cloudflared` executable; see
+the platform-specific installation note below.
+
 Create a sample event:
 
 ```json
@@ -124,9 +133,13 @@ behind wall-clock time. A low rate with an up-to-date cursor means current
 demand is low; **Catching up** means the reader is still consuming older events.
 
 The OS socket bind rejects a second gateway on the same host. A SHA-guarded
-registry lease rejects a coordinator on another host if one is already active.
-After an ungraceful crash, verify the old process has stopped before using
-`python coordinator.py --force-metrics-lease` to replace its stale lease.
+registry lease rejects a coordinator from another installation if one is
+already active. The local installation ID is stored beside the post database,
+so this installation automatically reclaims its own lease after an ungraceful
+exit. After upgrading from a version that used a new random ID on every run,
+verify the old process has stopped and use
+`python coordinator.py --force-metrics-lease` once to replace that legacy
+lease.
 
 ## Test
 

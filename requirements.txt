@@ -1,0 +1,6 @@
+# Install the project itself so its runtime dependencies stay in sync with
+# pyproject.toml. Editable mode also keeps local source changes immediately active.
+-e .
+
+# Test dependency used by tests/test_pipeline.py.
+pytest>=8,<10
