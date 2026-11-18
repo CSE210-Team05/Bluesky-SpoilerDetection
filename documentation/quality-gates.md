@@ -55,7 +55,10 @@ the rationale in the same pull request.
 ## Render documentation
 
 Documentation source is stored under `documentation/`. CI runs MkDocs in strict
-mode and uploads the rendered `site/` directory as a browsable artifact.
+mode and uploads the rendered `site/` directory as a workflow artifact on every
+pull request. After documentation changes merge to `main`, the separate
+`Documentation site` workflow publishes that same strict build to
+[GitHub Pages](https://cse210-team05.github.io/Bluesky-SpoilerDetection/).
 
 ```shell
 python -m mkdocs build --strict

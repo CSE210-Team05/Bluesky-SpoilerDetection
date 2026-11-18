@@ -1,6 +1,8 @@
 site_name: Bluesky Spoiler Detection
 site_description: Architecture, operation, and quality gates for the spoiler pipeline
+site_url: https://cse210-team05.github.io/Bluesky-SpoilerDetection/
 repo_url: https://github.com/CSE210-Team05/Bluesky-SpoilerDetection
+edit_uri: edit/main/documentation/
 docs_dir: documentation
 site_dir: site
 
