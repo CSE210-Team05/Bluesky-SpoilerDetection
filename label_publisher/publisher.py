@@ -7,7 +7,7 @@ labeling client can be added without changing queue behavior.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import socket
@@ -23,22 +23,12 @@ class LabelClient(Protocol):
 
 @dataclass
 class DryRunLabelClient:
-    """Explicit development client that records instead of publishing."""
+    """Constant-memory development client that doesn't publish externally."""
 
-    published: list[LabelJob] = field(default_factory=list)
+    published_count: int = 0
 
     def publish(self, job: LabelJob) -> None:
-        self.published.append(job)
-        print(
-            json.dumps(
-                {
-                    "dry_run": True,
-                    "uri": job.post_uri,
-                    "cid": job.post_cid,
-                    "label": job.label_value,
-                }
-            )
-        )
+        self.published_count += 1
 
 
 def process_once(

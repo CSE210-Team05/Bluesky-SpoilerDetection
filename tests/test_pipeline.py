@@ -114,11 +114,11 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
     posts.enqueue_and_checkpoint([negative], stream_id="test-stream", sequence=2)
 
     result = detect_once(posts, labels, detector, "detector-a", batch_size=10)
-    assert result == {"claimed": 2, "positive": 1, "negative": 1, "failed": 0}
+    assert result == {"claimed": 2, "positive": 2, "negative": 0, "failed": 0}
     assert posts.metrics()["available"] == 0
 
-    claimed = labels.claim("publisher-a")
-    assert len(claimed) == 1
+    claimed = labels.claim("publisher-a", limit=10)
+    assert len(claimed) == 2
     assert claimed[0].job.post_cid == positive.post_cid
     assert claimed[0].job.label_value == "spoiler"
 
@@ -272,3 +272,16 @@ def test_metrics_are_pushed_to_github_without_pipeline_listener() -> None:
     assert "metrics.publisher" in metrics.command
     assert "--host" not in metrics.command
     assert "--port" not in metrics.command
+
+
+def test_dashboard_polls_raw_metrics_without_redeploying() -> None:
+    app = Path("docs/app.js").read_text(encoding="utf-8")
+    workflow = Path(".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
+
+    assert (
+        "https://raw.githubusercontent.com/CSE210-Team05/"
+        "Bluesky-SpoilerDetection/main/docs/metrics.json"
+    ) in app
+    assert "window.setInterval(refresh, 5_000)" in app
+    assert '"docs/**"' not in workflow
+    assert "docs/metrics.json" not in workflow

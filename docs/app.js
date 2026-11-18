@@ -1,4 +1,5 @@
 const byId = (id) => document.getElementById(id);
+const metricsSource = "https://raw.githubusercontent.com/CSE210-Team05/Bluesky-SpoilerDetection/main/docs/metrics.json";
 
 const formatRate = (value) => Number(value || 0).toFixed(2);
 const formatInteger = (value) => new Intl.NumberFormat().format(Number(value || 0));
@@ -78,8 +79,7 @@ function render(data) {
 
 async function refresh() {
   try {
-    const source = "metrics.json";
-    const response = await fetch(`${source}${source.includes("?") ? "&" : "?"}t=${Date.now()}`, {
+    const response = await fetch(`${metricsSource}?t=${Date.now()}`, {
       cache: "no-store",
     });
     if (!response.ok) throw new Error(`metrics request returned ${response.status}`);

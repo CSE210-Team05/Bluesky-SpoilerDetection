@@ -54,18 +54,20 @@ to the configured limit.
 
 Configure GitHub Pages to publish from `docs/`. The dashboard runs entirely on
 GitHub Pages, while the pipeline and SQLite databases remain on the pipeline
-machine. The page reads the same-origin `docs/metrics.json` snapshot and never
-connects to the pipeline host.
+machine. The deployed JavaScript polls the repository's raw
+`docs/metrics.json` file every five seconds and never connects to the pipeline
+host.
 
 Every five minutes, the pipeline generates a fresh aggregate snapshot and uses
-GitHub's Contents API to update `docs/metrics.json`. This creates a small commit
-and lets the normal GitHub Pages deployment publish the new data. There is no
+GitHub's Contents API to update `docs/metrics.json`. This creates a small commit,
+but does not redeploy GitHub Pages; the already-deployed dashboard reads the new
+raw file directly. There is no
 inbound firewall rule, metrics listener, CORS configuration, or reverse proxy
 on the pipeline machine.
 
 The repository includes `.github/workflows/deploy-pages.yml`. It validates and
-deploys `docs/` whenever dashboard files change on `main`, including the metrics
-commits made by the pipeline. In the repository's **Settings → Pages**, select
+deploys `docs/` only when frontend files change on `main`; metrics-only commits
+do not trigger a deployment. In the repository's **Settings → Pages**, select
 **GitHub Actions** as the publishing source. You can validate the artifact
 locally before pushing:
 
@@ -113,6 +115,6 @@ python -m pytest
   idempotent. A live publishing client must also use the job ID as its
   idempotency key where the labeling service supports one.
 - The SQLite databases must live on a local disk, not a network filesystem.
-- The keyword detector is a replaceable placeholder configured by
-  `config/spoiler_tags.json`.
+- The detector is currently in throughput mode and returns positive immediately
+  for every post. The keyword implementation remains present but bypassed.
 - Live Bluesky label publication remains an explicit integration task.

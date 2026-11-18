@@ -43,7 +43,7 @@ Pipeline machine               GitHub repository        GitHub Pages
 All pipeline stages
         |
         v
-Metrics snapshot publisher -> docs/metrics.json -> Static dashboard
+Metrics snapshot publisher -> docs/metrics.json <- Static dashboard polling raw file
 ```
 
 Square brackets denote a horizontally scalable worker pool. The detector pool
@@ -55,8 +55,9 @@ Each pipeline stage also reports operational metrics. A lightweight, static
 GitHub Pages dashboard displays the current spoiler tags and pipeline health so
 bottlenecks can be identified without accessing the worker processes directly.
 The dashboard and pipeline run on separate machines. The pipeline periodically
-pushes an aggregate snapshot to GitHub, and the dashboard reads that static
-same-origin file. GitHub Pages never connects to the pipeline machine; SQLite
+pushes an aggregate snapshot to GitHub, and the deployed dashboard polls the
+repository's raw snapshot without requiring a Pages redeployment. GitHub Pages
+never connects to the pipeline machine; SQLite
 databases and pipeline control operations remain private to the pipeline host.
 
 ## Directory Structure
@@ -178,6 +179,11 @@ logic. Multiple detector worker processes may consume from the post queue in
 parallel. A negative result is acknowledged and discarded. A positive result
 is acknowledged only after its label job has been durably enqueued.
 
+The first-pass implementation runs in throughput mode: detection returns
+positive immediately for every post so queue and publisher capacity can be
+measured without classification cost. Real spoiler logic will replace this
+early return later.
+
 The term *detector* is used here instead of *labeler* to distinguish content
 classification from the AT Protocol labeling service that publishes labels.
 
@@ -232,9 +238,9 @@ The collector periodically creates a small snapshot containing no credentials,
 post contents, user identifiers, or administrative controls. A dedicated
 publisher sends that snapshot to `docs/metrics.json` through GitHub's Contents
 API. The token stays in an environment variable on the pipeline machine and is
-restricted to repository Contents write access. GitHub Pages serves the
-snapshot as a same-origin static file, so no inbound service is exposed by the
-pipeline host.
+restricted to repository Contents write access. The dashboard polls the raw
+repository file every five seconds; metrics-only commits do not redeploy the
+frontend, and no inbound service is exposed by the pipeline host.
 
 The dashboard displays:
 
@@ -265,7 +271,8 @@ the active spoiler tags or any runtime configuration.
    metrics collector.
 10. The metrics publisher periodically commits the aggregate snapshot to
     GitHub.
-11. The GitHub Pages dashboard reads and displays the deployed static snapshot.
+11. The GitHub Pages dashboard polls and displays the raw repository snapshot
+    without waiting for another Pages deployment.
 
 ## Architectural Rules
 

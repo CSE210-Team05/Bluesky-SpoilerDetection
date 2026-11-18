@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "docs/**"
+      - "docs/index.html"
+      - "docs/app.js"
+      - "docs/styles.css"
       - "index.html"
       - "scripts/prepare-pages.sh"
       - ".github/workflows/deploy-pages.yml"
