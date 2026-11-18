@@ -549,7 +549,7 @@ def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
     ) in app
     assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=5"' in index
+    assert 'src="app.js?v=6"' in index
     assert "Up to date" in app
     assert "Catching up" in app
     assert '"docs/**"' not in workflow

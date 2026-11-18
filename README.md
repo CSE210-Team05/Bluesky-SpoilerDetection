@@ -7,6 +7,8 @@ First-pass implementation of the queue-based pipeline described in
 reader -> SQLite post queue -> detector workers -> SQLite label queue -> publishers
 ```
 
+![Bluesky spoiler detection pipeline workflow](Workflow.png)
+
 The live reader connects to Bluesky's public Jetstream JSON WebSocket and asks
 the server for `app.bsky.feed.post` events only. JSON Lines replay remains
 available for development, and the publisher is deliberately dry-run-only until
