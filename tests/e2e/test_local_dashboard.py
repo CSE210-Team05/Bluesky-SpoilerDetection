@@ -181,6 +181,9 @@ def test_coordinator_renders_processed_event_in_local_dashboard(
         expect(page.get_by_role("heading", name="Pipeline performance")).to_be_visible()
         expect(page.locator(".environment")).to_have_text("Local")
         expect(page.locator("#events-received")).to_have_text("1", timeout=15_000)
+        expect(page.locator("#detection-rate")).not_to_have_text("--")
+        expect(page.locator("#label-rate")).not_to_have_text("--")
+        expect(page.get_by_role("heading", name="Positive labels")).to_be_visible()
         expect(
             page.locator("#totals div").filter(has_text="Ingested").locator("dd")
         ).to_have_text("1", timeout=15_000)

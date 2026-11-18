@@ -909,7 +909,7 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert "raw.githubusercontent.com" not in app
     assert "endpointRegistry" not in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=10"' in index
+    assert 'src="app.js?v=11"' in index
     assert '<span class="environment">Local</span>' in index
     assert "Worker pools" in index
     assert 'id="detector-workers"' in index
@@ -917,6 +917,10 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert 'id="publisher-workers"' in index
     assert "average_queue_wait_seconds" in app
     assert "average_claim_seconds" in app
+    assert 'id="detection-rate"' in index
+    assert "rates.detection_per_second" in app
+    assert "All posts classified" in index
+    assert "Posts matching a configured spoiler tag" in index
     assert "Up to date" in app
     assert "Catching up" in app
     assert "AbortController" in app
