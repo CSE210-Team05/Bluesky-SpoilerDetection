@@ -44,6 +44,15 @@ def build_snapshot(
     config = load_tag_config(tag_config)
     source_lag = posts["stream_source_lag_seconds"]
     connected = bool(posts["stream_connected"])
+    caught_up = (
+        None
+        if connected and source_lag is None
+        else (
+            connected
+            and source_lag is not None
+            and float(source_lag) <= caught_up_lag_seconds
+        )
+    )
     return {
         "generated_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
         "window_seconds": window_seconds,
@@ -57,11 +66,7 @@ def build_snapshot(
         "stream": {
             "id": posts["stream_id"],
             "connected": connected,
-            "caught_up": (
-                connected
-                and source_lag is not None
-                and float(source_lag) <= caught_up_lag_seconds
-            ),
+            "caught_up": caught_up,
             "caught_up_lag_seconds": caught_up_lag_seconds,
             "reconnect_total": posts["stream_reconnect_total"],
             "received_total": posts["stream_received_total"],

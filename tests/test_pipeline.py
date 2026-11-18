@@ -519,6 +519,28 @@ def test_metrics_snapshot_combines_both_interfaces(tmp_path: Path) -> None:
     assert snapshot["workers"]["window_seconds"] == 60
 
 
+def test_metrics_snapshot_leaves_catchup_unknown_until_first_source_event(
+    tmp_path: Path,
+) -> None:
+    posts = PostQueue(tmp_path / "waiting-posts.sqlite3")
+    labels = LabelQueue(tmp_path / "waiting-labels.sqlite3")
+    config = tmp_path / "waiting-tags.json"
+    config.write_text(
+        '{"label_value":"spoiler","version":"test-v1","tags":[]}',
+        encoding="utf-8",
+    )
+    posts.set_stream_connected("quiet-stream", True, now=100.0)
+
+    snapshot = build_snapshot(posts, labels, config, now=105.0)
+
+    assert snapshot["stream"]["connected"] is True
+    assert snapshot["stream"]["caught_up"] is None
+    assert snapshot["stream"]["source_lag_seconds"] is None
+    assert snapshot["stream"]["last_event_age_seconds"] is None
+    assert snapshot["queues"]["posts"]["available"] == 0
+    assert snapshot["queues"]["labels"]["available"] == 0
+
+
 def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
     tmp_path: Path,
 ) -> None:
@@ -901,7 +923,7 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert "raw.githubusercontent.com" not in app
     assert "endpointRegistry" not in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=10"' in index
+    assert 'src="app.js?v=11"' in index
     assert '<span class="environment">Local</span>' in index
     assert "Worker pools" in index
     assert 'id="detector-workers"' in index
@@ -911,6 +933,8 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert "average_claim_seconds" in app
     assert "Up to date" in app
     assert "Catching up" in app
+    assert "Connected — waiting for first source event" in app
+    assert "Empty queues do not indicate lag" in app
     assert "AbortController" in app
     assert "refreshInFlight" in app
     assert "updateWatchdog" in app
