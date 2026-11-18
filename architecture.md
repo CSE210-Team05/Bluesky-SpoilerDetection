@@ -38,12 +38,11 @@ Label queue
         v
 Bluesky labeling service
 
-Pipeline machine               GitHub repository        GitHub Pages
-----------------               -----------------        ------------
-All pipeline stages
-        |
-        v
-Metrics snapshot publisher -> docs/metrics.json <- Static dashboard polling raw file
+Pipeline machine              Runtime registry          GitHub Pages
+----------------              ----------------          ------------
+Metrics HTTP gateway --register tunnel URL--> endpoint.json
+        ^                                                   |
+        `------------- live HTTPS polling ------------------'
 ```
 
 Square brackets denote a horizontally scalable worker pool. The detector pool
@@ -54,11 +53,10 @@ bottleneck.
 Each pipeline stage also reports operational metrics. A lightweight, static
 GitHub Pages dashboard displays the current spoiler tags and pipeline health so
 bottlenecks can be identified without accessing the worker processes directly.
-The dashboard and pipeline run on separate machines. The pipeline periodically
-pushes an aggregate snapshot to GitHub, and the deployed dashboard polls the
-repository's raw snapshot without requiring a Pages redeployment. GitHub Pages
-never connects to the pipeline machine; SQLite
-databases and pipeline control operations remain private to the pipeline host.
+The dashboard and pipeline run on separate machines. The deployed dashboard
+discovers a coordinator-managed outbound tunnel and polls its aggregate metrics
+without requiring a Pages redeployment. SQLite databases and pipeline control
+operations remain private to the pipeline host.
 
 ## Directory Structure
 
@@ -82,13 +80,13 @@ databases and pipeline control operations remain private to the pipeline host.
 |-- label_publisher/
 |   `-- publisher.py
 |-- metrics/
-|   |-- publisher.py
+|   |-- gateway.py
 |   `-- snapshot.py
 `-- docs/
     |-- index.html
     |-- app.js
     |-- styles.css
-    `-- metrics.json
+    `-- metrics-endpoint.json
 ```
 
 The `*_core` directories are private implementation areas. Code outside an
@@ -100,14 +98,16 @@ interface directory must not import from its core directory.
 
 `coordinator.py` is the single operational entry point for the pipeline. It
 reads `config/pipeline.json` and starts the reader, configured detector pool,
-configured publisher pool, and metrics publisher as independent child
+configured publisher pool, and metrics gateway as independent child
 processes.
 
-The coordinator monitors all child processes, restarts failed detector,
-publisher, or metrics processes up to a configured limit, and shuts every
-component down together on `SIGINT` or `SIGTERM`. The reader remains a single
-active process. An unexpected reader failure stops the pipeline rather than
-silently starting a competing reader.
+The coordinator starts the metrics gateway first and waits for it to acquire
+the exclusive lease and publish a working tunnel before starting any pipeline
+worker. It monitors all child processes, restarts failed detector and publisher
+processes up to a configured limit, and shuts every component down together on
+`SIGINT` or `SIGTERM`. The gateway and reader are critical singletons: if
+either stops, the entire pipeline stops rather than silently starting a
+competing owner.
 
 When a finite reader input ends successfully, the coordinator waits until both
 SQLite queues are drained and then performs a graceful shutdown. Configuration
@@ -234,13 +234,21 @@ central collector. Metrics reporting must not block or otherwise participate in
 the main processing path; a metrics outage must not stop ingestion, detection,
 or publication.
 
-The collector periodically creates a small snapshot containing no credentials,
-post contents, user identifiers, or administrative controls. A dedicated
-publisher sends that snapshot to `docs/metrics.json` through GitHub's Contents
-API. The token stays in an environment variable on the pipeline machine and is
-restricted to repository Contents write access. The dashboard polls the raw
-repository file every five seconds; metrics-only commits do not redeploy the
-frontend, and no inbound service is exposed by the pipeline host.
+The collector creates small snapshots containing no credentials, post contents,
+user identifiers, or administrative controls. A coordinator-managed HTTP
+gateway serves the current snapshot from a loopback port. The coordinator also
+starts an outbound Cloudflare Quick Tunnel and registers its temporary HTTPS URL
+in `docs/metrics-endpoint.json` on the isolated `metrics-runtime` branch. The
+dashboard waits for an active registration and then polls the live endpoint
+once per second. Metric values are never committed and the frontend is not
+redeployed when they change.
+
+The local HTTP bind is exclusive. Cross-machine exclusivity is enforced with a
+GitHub Contents API compare-and-swap lease: only the coordinator that updates
+the registry from the observed file SHA owns the public endpoint. A second
+coordinator must refuse to run while the registry is `starting` or `active`.
+Forced replacement exists only for recovery from an ungraceful shutdown after
+an operator verifies the recorded owner is no longer running.
 
 The dashboard displays:
 
@@ -269,10 +277,10 @@ the active spoiler tags or any runtime configuration.
 8. The publisher acknowledges the job after publication succeeds.
 9. Every stage asynchronously reports counters, errors, and queue health to the
    metrics collector.
-10. The metrics publisher periodically commits the aggregate snapshot to
-    GitHub.
-11. The GitHub Pages dashboard polls and displays the raw repository snapshot
-    without waiting for another Pages deployment.
+10. The metrics gateway serves aggregate snapshots through its outbound HTTPS
+    tunnel.
+11. The GitHub Pages dashboard discovers the leased endpoint and polls live
+    values without another Pages deployment.
 
 ## Architectural Rules
 
@@ -299,11 +307,12 @@ the active spoiler tags or any runtime configuration.
 - Metrics collection must never block the processing pipeline.
 - The public metrics snapshot contains aggregate operational data only and
   exposes no secrets, post contents, user identifiers, or write operations.
-- GitHub Pages never connects to the pipeline host. The pipeline pushes only
-  aggregate metrics to GitHub, while SQLite files and coordinator interfaces
-  remain private.
+- GitHub Pages may read only the aggregate `/metrics` endpoint through the
+  outbound tunnel. SQLite files and coordinator control interfaces remain
+  private and the local HTTP server listens only on loopback.
 - The GitHub write token exists only on the pipeline machine, is loaded from an
-  environment variable, and is limited to repository Contents write access.
+  environment variable, and is limited to repository Contents write access. It
+  is used for endpoint discovery and exclusive leasing, not metric delivery.
 - Buffering, storage, and transport details stay behind the interfaces so they
   can change without affecting consumers.
 - Data passed across a boundary should use an explicit, shared contract rather
@@ -318,8 +327,7 @@ the active spoiler tags or any runtime configuration.
 - Choose the persistent idempotency key for publication, likely the combination
   of post URI, CID, and label value.
 - Define how completed or failed label publications are recorded.
-- Provision the fine-grained GitHub token on the pipeline machine.
-- Revisit the five-minute publication interval if commit volume or Pages build
-  latency makes the dashboard impractical.
+- Provision the fine-grained GitHub token and `cloudflared` executable on each
+  machine permitted to run the coordinator.
 - Establish measured SQLite queue-depth, lock-wait, and write-latency thresholds
   that would trigger migration to an external queue broker.

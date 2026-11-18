@@ -1,5 +1,6 @@
 const byId = (id) => document.getElementById(id);
-const metricsSource = "https://raw.githubusercontent.com/CSE210-Team05/Bluesky-SpoilerDetection/main/docs/metrics.json";
+const endpointRegistry = "https://raw.githubusercontent.com/CSE210-Team05/Bluesky-SpoilerDetection/metrics-runtime/docs/metrics-endpoint.json";
+let metricsSource = null;
 
 const formatRate = (value) => Number(value || 0).toFixed(2);
 const formatInteger = (value) => new Intl.NumberFormat().format(Number(value || 0));
@@ -78,6 +79,26 @@ function render(data) {
 }
 
 async function refresh() {
+  if (metricsSource === null) {
+    try {
+      const response = await fetch(`${endpointRegistry}?t=${Date.now()}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`endpoint registry returned ${response.status}`);
+      const endpoint = await response.json();
+      if (endpoint.state !== "active" || !endpoint.public_url) {
+        throw new Error("the coordinator has not opened the live metrics endpoint yet");
+      }
+      metricsSource = `${endpoint.public_url.replace(/\/$/, "")}/metrics`;
+    } catch (error) {
+      byId("status-dot").className = "status-dot stale";
+      byId("freshness").textContent = "Waiting for live metrics endpoint…";
+      byId("error").textContent = String(error);
+      byId("error").hidden = true;
+      return;
+    }
+  }
+
   try {
     const response = await fetch(`${metricsSource}?t=${Date.now()}`, {
       cache: "no-store",
@@ -85,12 +106,13 @@ async function refresh() {
     if (!response.ok) throw new Error(`metrics request returned ${response.status}`);
     render(await response.json());
   } catch (error) {
+    metricsSource = null;
     byId("status-dot").className = "status-dot stale";
-    byId("freshness").textContent = "Snapshot unavailable";
+    byId("freshness").textContent = "Live endpoint unavailable; reconnecting…";
     byId("error").textContent = String(error);
-    byId("error").hidden = false;
+    byId("error").hidden = true;
   }
 }
 
 refresh();
-window.setInterval(refresh, 5_000);
+window.setInterval(refresh, 1_000);

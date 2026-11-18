@@ -8,7 +8,7 @@ required_files=(
   docs/index.html
   docs/app.js
   docs/styles.css
-  docs/metrics.json
+  docs/metrics-endpoint.json
 )
 
 for file in "${required_files[@]}"; do
@@ -18,7 +18,7 @@ for file in "${required_files[@]}"; do
   fi
 done
 
-python3 -m json.tool docs/metrics.json >/dev/null
+python3 -m json.tool docs/metrics-endpoint.json >/dev/null
 
 if find docs -type l -print -quit | grep -q .; then
   echo "GitHub Pages artifact must not contain symbolic links" >&2

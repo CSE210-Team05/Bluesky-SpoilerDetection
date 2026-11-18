@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Sequence
+from urllib.request import urlopen
 
 from Bluesky_interface.post_fetcher_interface import PostQueue
 from spoiler_interface.spoiler_interface import LabelQueue
@@ -25,6 +26,9 @@ class ComponentSpec:
     command: tuple[str, ...]
     restart: bool = True
     is_reader: bool = False
+    critical: bool = False
+    readiness_url: str | None = None
+    startup_timeout_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,7 @@ def build_component_specs(
     python_executable: str = sys.executable,
     input_override: str | Path | None = None,
     max_events_override: int | None = None,
+    force_metrics_lease: bool = False,
 ) -> list[ComponentSpec]:
     databases = config["databases"]
     post_database = _path_argument(databases["posts"])
@@ -71,32 +76,52 @@ def build_component_specs(
 
     metrics = config["metrics"]
     if metrics.get("enabled", True):
+        command = [
+            python_executable,
+            "-m",
+            "metrics.gateway",
+            "--post-database",
+            post_database,
+            "--label-database",
+            label_database,
+            "--config",
+            _path_argument(metrics.get("tag_config", "config/spoiler_tags.json")),
+            "--repository",
+            str(metrics["repository"]),
+            "--registry-path",
+            str(metrics.get("registry_path", "docs/metrics-endpoint.json")),
+            "--registry-branch",
+            str(metrics.get("registry_branch", "metrics-runtime")),
+            "--registry-source-branch",
+            str(metrics.get("registry_source_branch", "main")),
+            "--token-env",
+            str(metrics.get("token_env", "GITHUB_METRICS_TOKEN")),
+            "--host",
+            str(metrics.get("host", "127.0.0.1")),
+            "--port",
+            str(metrics.get("port", 8765)),
+            "--allowed-origin",
+            str(metrics["allowed_origin"]),
+            "--cloudflared",
+            str(metrics.get("cloudflared_executable", "cloudflared")),
+            "--tunnel-timeout",
+            str(metrics.get("tunnel_timeout_seconds", 30)),
+            "--window-seconds",
+            str(metrics.get("window_seconds", 300)),
+        ]
+        if force_metrics_lease:
+            command.append("--force-lease")
         specs.append(
             ComponentSpec(
                 name="metrics",
-                command=(
-                    python_executable,
-                    "-m",
-                    "metrics.publisher",
-                    "--post-database",
-                    post_database,
-                    "--label-database",
-                    label_database,
-                    "--config",
-                    _path_argument(metrics.get("tag_config", "config/spoiler_tags.json")),
-                    "--repository",
-                    str(metrics["repository"]),
-                    "--path",
-                    str(metrics.get("path", "docs/metrics.json")),
-                    "--branch",
-                    str(metrics.get("branch", "main")),
-                    "--token-env",
-                    str(metrics.get("token_env", "GITHUB_METRICS_TOKEN")),
-                    "--interval-seconds",
-                    str(metrics.get("publish_interval_seconds", 300)),
-                    "--window-seconds",
-                    str(metrics.get("window_seconds", 300)),
+                command=tuple(command),
+                restart=False,
+                critical=True,
+                readiness_url=(
+                    f"http://{metrics.get('host', '127.0.0.1')}:"
+                    f"{metrics.get('port', 8765)}/health"
                 ),
+                startup_timeout_seconds=float(metrics.get("startup_timeout_seconds", 60)),
             )
         )
 
@@ -230,6 +255,37 @@ class Coordinator:
         self.processes[spec.name] = process
         print(f"[coordinator] started {spec.name} pid={process.pid}", flush=True)
 
+    def _wait_until_ready(self, spec: ComponentSpec) -> bool:
+        if spec.readiness_url is None:
+            return True
+        process = self.processes[spec.name]
+        deadline = time.monotonic() + spec.startup_timeout_seconds
+        while time.monotonic() < deadline and not self.stop_requested:
+            return_code = process.poll()
+            if return_code is not None:
+                print(
+                    f"[coordinator] {spec.name} failed during startup with status {return_code}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+            try:
+                with urlopen(spec.readiness_url, timeout=0.5) as response:
+                    payload = json.load(response)
+                if payload.get("status") == "active":
+                    print(f"[coordinator] {spec.name} is ready", flush=True)
+                    return True
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
+        print(
+            f"[coordinator] {spec.name} did not become ready within "
+            f"{spec.startup_timeout_seconds:g}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
     def _queues_are_drained(self) -> bool:
         post_metrics = self.post_queue.metrics()
         label_metrics = self.label_queue.metrics()
@@ -246,6 +302,8 @@ class Coordinator:
         try:
             for spec in self.specs.values():
                 self._start(spec)
+                if not self._wait_until_ready(spec):
+                    return self.processes[spec.name].poll() or 1
 
             while not self.stop_requested:
                 for name, process in list(self.processes.items()):
@@ -258,6 +316,14 @@ class Coordinator:
                         f"[coordinator] {name} exited with status {return_code}",
                         flush=True,
                     )
+
+                    if spec.critical:
+                        print(
+                            f"[coordinator] critical component {name} stopped; refusing to run",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        return return_code or 1
 
                     if spec.is_reader:
                         if return_code != 0:
@@ -316,6 +382,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="live smoke test: stop after this many Jetstream messages",
     )
+    parser.add_argument(
+        "--force-metrics-lease",
+        action="store_true",
+        help="replace a stale remote metrics lease after verifying its owner has stopped",
+    )
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -323,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         config,
         input_override=args.input,
         max_events_override=args.max_events,
+        force_metrics_lease=args.force_metrics_lease,
     )
     databases = config["databases"]
     coordinator = Coordinator(

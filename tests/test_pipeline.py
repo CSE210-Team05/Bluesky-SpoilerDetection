@@ -5,6 +5,8 @@ import json
 from io import BytesIO
 from pathlib import Path
 
+import pytest
+
 from Bluesky_interface.post_fetcher_core.post_fetcher import (
     PostReader,
     build_jetstream_url,
@@ -12,8 +14,8 @@ from Bluesky_interface.post_fetcher_core.post_fetcher import (
 )
 from Bluesky_interface.post_fetcher_interface import PostJob, PostQueue
 from coordinator import build_component_specs, load_config, load_supervision_settings
-from label_publisher.publisher import process_once as publish_once
-from metrics.publisher import GitHubContentsPublisher
+from label_publisher.publisher import DryRunLabelClient, process_once as publish_once
+from metrics.gateway import GitHubEndpointRegistry, LeaseUnavailable, MetricsHTTPServer
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_core.spoiler_detector import (
     KeywordSpoilerDetector,
@@ -158,6 +160,26 @@ def test_publisher_acknowledges_success(tmp_path: Path) -> None:
     assert labels.metrics()["available"] == 0
 
 
+def test_dry_run_publisher_logs_each_output(capsys) -> None:
+    client = DryRunLabelClient()
+    job = LabelJob.create(
+        post_uri="at://did:plc:test/app.bsky.feed.post/1",
+        post_cid="cid-1",
+        label_value="spoiler",
+        detector_version="test-v1",
+    )
+
+    client.publish(job)
+
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "dry_run_published": 1,
+        "post_uri": job.post_uri,
+        "post_cid": job.post_cid,
+        "label": "spoiler",
+    }
+
+
 def test_metrics_snapshot_combines_both_interfaces(tmp_path: Path) -> None:
     posts = PostQueue(tmp_path / "posts.sqlite3")
     labels = LabelQueue(tmp_path / "labels.sqlite3")
@@ -185,33 +207,70 @@ def test_parser_rejects_missing_cursor() -> None:
         raise AssertionError("missing cursor was accepted")
 
 
-def test_github_metrics_publisher_updates_existing_snapshot() -> None:
+def test_metrics_registry_lease_uses_compare_and_swap() -> None:
     requests = []
+    endpoint = {
+        "state": "offline",
+        "instance_id": None,
+        "public_url": None,
+        "updated_at": None,
+    }
 
     def opener(request, *, timeout):
         requests.append((request, timeout))
+        if "/git/refs/heads/metrics-runtime" in request.full_url:
+            return BytesIO(b'{"object":{"sha":"branch-sha"}}')
         if request.method == "GET":
-            return BytesIO(b'{"sha":"existing-file-sha"}')
-        return BytesIO(b'{"commit":{"sha":"new-commit-sha"}}')
+            encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
+            return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
+        return BytesIO(b'{"content":{"sha":"lease-sha"}}')
 
-    publisher = GitHubContentsPublisher(
-        repository="CSE210-Team05/Bluesky-SpoilerDetection",
-        path="docs/metrics.json",
-        branch="main",
-        token="secret-token",
+    registry = GitHubEndpointRegistry(
+        repository="owner/repository",
+        path="docs/metrics-endpoint.json",
+        branch="metrics-runtime",
+        source_branch="main",
+        token="secret",
         opener=opener,
     )
-    commit = publisher.publish({"generated_at": "now", "rates": {}})
 
-    assert commit == "new-commit-sha"
-    assert [request.method for request, _ in requests] == ["GET", "PUT"]
-    update = json.loads(requests[1][0].data)
-    assert update["sha"] == "existing-file-sha"
-    assert update["branch"] == "main"
-    assert json.loads(base64.b64decode(update["content"])) == {
-        "generated_at": "now",
-        "rates": {},
+    assert registry.acquire("instance-a") == "lease-sha"
+    update = json.loads(requests[-1][0].data)
+    assert update["sha"] == "old-sha"
+    record = json.loads(base64.b64decode(update["content"]))
+    assert record["state"] == "starting"
+    assert record["instance_id"] == "instance-a"
+
+
+def test_metrics_registry_refuses_an_active_owner() -> None:
+    endpoint = {
+        "state": "active",
+        "instance_id": "instance-a",
+        "public_url": "https://example.trycloudflare.com",
     }
+
+    def opener(request, *, timeout):
+        if "/git/refs/heads/metrics-runtime" in request.full_url:
+            return BytesIO(b'{"object":{"sha":"branch-sha"}}')
+        encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
+        return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
+
+    registry = GitHubEndpointRegistry(
+        repository="owner/repository",
+        path="docs/metrics-endpoint.json",
+        branch="metrics-runtime",
+        source_branch="main",
+        token="secret",
+        opener=opener,
+    )
+
+    with pytest.raises(LeaseUnavailable, match="already claimed"):
+        registry.acquire("instance-b")
+
+
+def test_metrics_http_port_disallows_socket_reuse() -> None:
+    assert MetricsHTTPServer.allow_reuse_address is False
+    assert MetricsHTTPServer.allow_reuse_port is False
 
 
 def test_coordinator_builds_complete_process_group(tmp_path: Path) -> None:
@@ -259,31 +318,34 @@ def test_coordinator_can_bound_live_smoke_test() -> None:
     assert reader.command[reader.command.index("--max-events") + 1] == "25"
 
 
-def test_metrics_are_pushed_to_github_without_pipeline_listener() -> None:
+def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
     pipeline = load_config(Path("config/pipeline.json"))
     specs = build_component_specs(pipeline, python_executable="python-test")
     metrics = next(spec for spec in specs if spec.name == "metrics")
 
-    assert "host" not in pipeline["metrics"]
-    assert "port" not in pipeline["metrics"]
     assert pipeline["metrics"]["repository"] == "CSE210-Team05/Bluesky-SpoilerDetection"
-    assert pipeline["metrics"]["path"] == "docs/metrics.json"
+    assert pipeline["metrics"]["registry_path"] == "docs/metrics-endpoint.json"
+    assert pipeline["metrics"]["registry_branch"] == "metrics-runtime"
     assert pipeline["metrics"]["token_env"] == "GITHUB_METRICS_TOKEN"
-    assert "metrics.publisher" in metrics.command
-    assert "--host" not in metrics.command
-    assert "--port" not in metrics.command
+    assert "metrics.gateway" in metrics.command
+    assert metrics.critical
+    assert not metrics.restart
+    assert metrics.command[metrics.command.index("--host") + 1] == "127.0.0.1"
+    assert metrics.command[metrics.command.index("--port") + 1] == "8765"
 
 
-def test_dashboard_polls_raw_metrics_without_redeploying() -> None:
+def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
     app = Path("docs/app.js").read_text(encoding="utf-8")
     index = Path("docs/index.html").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
 
     assert (
         "https://raw.githubusercontent.com/CSE210-Team05/"
-        "Bluesky-SpoilerDetection/main/docs/metrics.json"
+        "Bluesky-SpoilerDetection/metrics-runtime/docs/metrics-endpoint.json"
     ) in app
-    assert "window.setInterval(refresh, 5_000)" in app
-    assert 'src="app.js?v=2"' in index
+    assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
+    assert "window.setInterval(refresh, 1_000)" in app
+    assert 'src="app.js?v=3"' in index
     assert '"docs/**"' not in workflow
     assert "docs/metrics.json" not in workflow
+    assert "docs/metrics-endpoint.json" not in workflow

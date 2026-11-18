@@ -29,6 +29,17 @@ class DryRunLabelClient:
 
     def publish(self, job: LabelJob) -> None:
         self.published_count += 1
+        print(
+            json.dumps(
+                {
+                    "dry_run_published": self.published_count,
+                    "post_uri": job.post_uri,
+                    "post_cid": job.post_cid,
+                    "label": job.label_value,
+                }
+            ),
+            flush=True,
+        )
 
 
 def process_once(

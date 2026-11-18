@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--post-database", type=Path, default=Path("data/posts.sqlite3"))
     parser.add_argument("--label-database", type=Path, default=Path("data/labels.sqlite3"))
     parser.add_argument("--config", type=Path, default=Path("config/spoiler_tags.json"))
-    parser.add_argument("--output", type=Path, default=Path("docs/metrics.json"))
+    parser.add_argument("--output", type=Path, default=Path("data/metrics.json"))
     parser.add_argument("--window-seconds", type=int, default=60)
     args = parser.parse_args(argv)
 

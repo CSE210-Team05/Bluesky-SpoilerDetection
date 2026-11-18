@@ -42,7 +42,7 @@ python coordinator.py --max-events 100
 ```
 
 The coordinator starts the configured reader, detector workers, publisher
-workers, and metrics publisher. When a finite input file reaches EOF, it waits
+workers, and live metrics gateway. When a finite input file reaches EOF, it waits
 for both queues to drain and shuts the remaining components down. Without
 `--input`, the reader consumes the live Jetstream connection and resumes from
 the cursor stored in the post database after a reconnect or restart.
@@ -52,18 +52,23 @@ temporary dry-run publisher setting live in `config/pipeline.json`. Stop the
 whole process group with `Ctrl-C`; individual failed workers are restarted up
 to the configured limit.
 
-Configure GitHub Pages to publish from `docs/`. The dashboard runs entirely on
-GitHub Pages, while the pipeline and SQLite databases remain on the pipeline
-machine. The deployed JavaScript polls the repository's raw
-`docs/metrics.json` file every five seconds and never connects to the pipeline
-host.
+Configure GitHub Pages to publish from `docs/`. The dashboard remains a static
+site, but its JavaScript discovers the active coordinator and reads live
+snapshots from its metrics gateway once per second. The coordinator binds a
+loopback-only HTTP server, starts an outbound Cloudflare Quick Tunnel, and
+registers that temporary HTTPS URL on the `metrics-runtime` branch. Metric
+values are never committed to GitHub and do not cause Pages deployments.
 
-Every five minutes, the pipeline generates a fresh aggregate snapshot and uses
-GitHub's Contents API to update `docs/metrics.json`. This creates a small commit,
-but does not redeploy GitHub Pages; the already-deployed dashboard reads the new
-raw file directly. There is no
-inbound firewall rule, metrics listener, CORS configuration, or reverse proxy
-on the pipeline machine.
+Install `cloudflared` once on each machine that may run the coordinator. On
+macOS with Homebrew:
+
+```shell
+brew install cloudflared
+```
+
+Quick Tunnels require no Cloudflare account, public IP address, router port
+forward, or inbound firewall rule. The coordinator owns the tunnel process and
+closes it during shutdown.
 
 The repository includes `.github/workflows/deploy-pages.yml`. It validates and
 deploys `docs/` only when frontend files change on `main`; metrics-only commits
@@ -81,24 +86,33 @@ Pages source to **GitHub Actions**. A root `index.html` redirect is included as
 a fallback, but the Actions source is the intended deployment mode.
 
 Create a fine-grained token limited to this repository with **Contents: write**
-permission. Store it only on the pipeline machine:
+permission. Store it only on the pipeline machine. The gateway uses it to
+create the `metrics-runtime` branch and atomically claim the single active
+endpoint; it is not used for publishing metric snapshots:
 
 ```shell
 export GITHUB_METRICS_TOKEN="..."
 ```
 
-The token name, repository, branch, destination path, publication interval, and
-rate window are configured in `config/pipeline.json`:
+The token name, repository, endpoint registry, local port, allowed browser
+origin, and rate window are configured in `config/pipeline.json`:
 
 ```json
 "metrics": {
   "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
-  "branch": "main",
-  "path": "docs/metrics.json",
+  "registry_branch": "metrics-runtime",
+  "registry_path": "docs/metrics-endpoint.json",
   "token_env": "GITHUB_METRICS_TOKEN",
-  "publish_interval_seconds": 300
+  "host": "127.0.0.1",
+  "port": 8765,
+  "allowed_origin": "https://cse210-team05.github.io"
 }
 ```
+
+The OS socket bind rejects a second gateway on the same host. A SHA-guarded
+registry lease rejects a coordinator on another host if one is already active.
+After an ungraceful crash, verify the old process has stopped before using
+`python coordinator.py --force-metrics-lease` to replace its stale lease.
 
 ## Test
 

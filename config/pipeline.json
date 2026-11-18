@@ -10,13 +10,19 @@
     "workers": 2
   },
   "metrics": {
-    "branch": "main",
+    "allowed_origin": "https://cse210-team05.github.io",
+    "cloudflared_executable": "cloudflared",
     "enabled": true,
-    "path": "docs/metrics.json",
-    "publish_interval_seconds": 300,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "registry_branch": "metrics-runtime",
+    "registry_path": "docs/metrics-endpoint.json",
+    "registry_source_branch": "main",
     "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
+    "startup_timeout_seconds": 60,
     "tag_config": "config/spoiler_tags.json",
     "token_env": "GITHUB_METRICS_TOKEN",
+    "tunnel_timeout_seconds": 30,
     "window_seconds": 300
   },
   "publishers": {
@@ -41,6 +47,6 @@
     "max_restarts": 5,
     "poll_seconds": 0.5,
     "restart_delay_seconds": 1.0,
-    "shutdown_timeout_seconds": 5.0
+    "shutdown_timeout_seconds": 15.0
   }
 }
