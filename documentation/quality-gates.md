@@ -50,7 +50,10 @@ summary, so a failed or slowing change can be compared by function rather than
 diagnosed from wall-clock time alone.
 The threshold is intentionally a portable single-worker floor. Raising it or
 changing the workload requires incrementing `benchmark_version` and recording
-the rationale in the same pull request.
+the rationale in the same pull request. Benchmark version 2 restores the real
+keyword/label match for every event while retaining an all-positive workload,
+so the result includes classification plus the worst-case durable label and
+publisher path.
 
 ## Render documentation
 

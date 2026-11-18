@@ -349,16 +349,13 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
         result = detect_once(worker_interface, detector, batch_size=10)
         persisted = worker_interface.flush()
 
-    assert result == {"claimed": 2, "positive": 2, "negative": 0, "failed": 0}
-    assert persisted == {"positive": 2, "negative": 0, "failed": 0}
+    assert result == {"claimed": 2, "positive": 1, "negative": 1, "failed": 0}
+    assert persisted == {"positive": 1, "negative": 1, "failed": 0}
     assert posts.metrics()["available"] == 0
 
     claimed = labels.claim("publisher-a", limit=10)
-    assert len(claimed) == 2
-    assert {delivery.job.post_cid for delivery in claimed} == {
-        positive.post_cid,
-        negative.post_cid,
-    }
+    assert len(claimed) == 1
+    assert claimed[0].job.post_cid == positive.post_cid
     assert {delivery.job.label_value for delivery in claimed} == {"spoiler"}
 
     duplicate = LabelJob.create(
@@ -368,6 +365,17 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
         detector_version="different-version",
     )
     assert not labels.enqueue(duplicate)
+
+
+def test_keyword_detector_matches_labels_without_substring_false_positives() -> None:
+    detector = KeywordSpoilerDetector(["spoiler", "finale"])
+
+    positive = detector.detect("The FINALE spoiler is here")
+
+    assert positive.is_spoiler is True
+    assert positive.matched_tags == ("spoiler", "finale")
+    assert detector.detect("This spoilerish word is harmless").is_spoiler is False
+    assert detector.detect("No configured label appears here").is_spoiler is False
 
 
 def test_detector_function_returns_only_id_and_decision(tmp_path: Path) -> None:

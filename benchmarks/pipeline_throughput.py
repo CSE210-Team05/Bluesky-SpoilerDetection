@@ -70,7 +70,7 @@ def _jobs(event_count: int) -> list[PostJob]:
             post_uri=f"at://did:plc:benchmark/app.bsky.feed.post/{sequence}",
             post_cid=f"benchmark-cid-{sequence}",
             author_did="did:plc:benchmark",
-            text="Representative post body used for throughput measurement",
+            text="Representative spoiler post body used for throughput measurement",
             received_at=1.0,
         )
         for sequence in range(1, event_count + 1)
@@ -88,8 +88,9 @@ def run_pipeline_benchmark(
     """Run every event through ingestion, detection, and publication.
 
     Queue schema creation is intentionally outside the timed region. The timed
-    workload includes job construction, durable ingestion, detector handoff to
-    the label queue, and publisher acknowledgement.
+    workload includes job construction, durable ingestion, production keyword
+    classification, detector handoff to the label queue, and publisher
+    acknowledgement.
     """
     if event_count < 1:
         raise ValueError("event_count must be positive")
@@ -100,7 +101,10 @@ def run_pipeline_benchmark(
     benchmark_directory.mkdir(parents=True, exist_ok=True)
     posts = PostQueue(benchmark_directory / "posts.sqlite3")
     labels = LabelQueue(benchmark_directory / "labels.sqlite3")
-    detector = KeywordSpoilerDetector([], version="throughput-v1")
+    # Every event is positive only after executing the production keyword
+    # matcher. This retains the worst-case durable label/publisher workload
+    # without bypassing classification.
+    detector = KeywordSpoilerDetector(["spoiler"], version="throughput-v2")
     client = _NoOpLabelClient()
     profiler = cProfile.Profile() if profile_path is not None else None
 
