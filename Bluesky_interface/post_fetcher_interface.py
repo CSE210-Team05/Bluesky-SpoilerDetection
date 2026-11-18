@@ -142,6 +142,7 @@ class PostQueue:
                     received_total INTEGER NOT NULL DEFAULT 0,
                     invalid_total INTEGER NOT NULL DEFAULT 0,
                     last_event_at REAL,
+                    source_event_at REAL,
                     updated_at REAL NOT NULL
                 );
 
@@ -165,6 +166,12 @@ class PostQueue:
                 );
                 """
             )
+            stream_health_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(stream_health)")
+            }
+            if "source_event_at" not in stream_health_columns:
+                connection.execute("ALTER TABLE stream_health ADD COLUMN source_event_at REAL")
 
     @staticmethod
     def _begin(connection: sqlite3.Connection) -> None:
@@ -196,6 +203,7 @@ class PostQueue:
         *,
         stream_id: str,
         sequence: int,
+        source_event_at: float | None = None,
         now: float | None = None,
     ) -> int:
         """Durably insert jobs and advance the stream cursor atomically."""
@@ -254,15 +262,20 @@ class PostQueue:
                 connection.execute(
                     """
                     INSERT INTO stream_health(
-                        stream_id, connected, received_total, last_event_at, updated_at
-                    ) VALUES (?, 1, 1, ?, ?)
+                        stream_id, connected, received_total, last_event_at,
+                        source_event_at, updated_at
+                    ) VALUES (?, 1, 1, ?, ?, ?)
                     ON CONFLICT(stream_id) DO UPDATE SET
                         connected = 1,
                         received_total = stream_health.received_total + 1,
                         last_event_at = excluded.last_event_at,
+                        source_event_at = COALESCE(
+                            excluded.source_event_at,
+                            stream_health.source_event_at
+                        ),
                         updated_at = excluded.updated_at
                     """,
-                    (stream_id, timestamp, timestamp),
+                    (stream_id, timestamp, source_event_at, timestamp),
                 )
                 if inserted:
                     connection.execute(
@@ -525,6 +538,7 @@ class PostQueue:
         }
         if stream is not None:
             last_event_at = stream["last_event_at"]
+            source_event_at = stream["source_event_at"]
             result.update(
                 {
                     "stream_id": str(stream["stream_id"]),
@@ -537,6 +551,11 @@ class PostQueue:
                         if last_event_at is None
                         else max(0.0, timestamp - float(last_event_at))
                     ),
+                    "stream_source_lag_seconds": (
+                        None
+                        if source_event_at is None
+                        else max(0.0, timestamp - float(source_event_at))
+                    ),
                 }
             )
         else:
@@ -548,6 +567,7 @@ class PostQueue:
                     "stream_received_total": 0,
                     "stream_invalid_total": 0,
                     "stream_last_event_age_seconds": None,
+                    "stream_source_lag_seconds": None,
                 }
             )
         return result

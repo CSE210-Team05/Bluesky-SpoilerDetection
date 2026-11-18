@@ -11,9 +11,11 @@
   },
   "metrics": {
     "allowed_origin": "https://cse210-team05.github.io",
+    "caught_up_lag_seconds": 10,
     "cloudflared_executable": "cloudflared",
     "enabled": true,
     "host": "127.0.0.1",
+    "live_rate_window_seconds": 10,
     "port": 8765,
     "registry_branch": "metrics-runtime",
     "registry_path": "docs/metrics-endpoint.json",

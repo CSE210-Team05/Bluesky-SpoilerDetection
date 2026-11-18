@@ -33,12 +33,15 @@ def build_snapshot(
     tag_config: str | Path,
     *,
     window_seconds: int = 60,
+    caught_up_lag_seconds: float = 10.0,
     now: float | None = None,
 ) -> dict[str, Any]:
     timestamp = time.time() if now is None else now
     posts = post_queue.metrics(window_seconds=window_seconds, now=timestamp)
     labels = label_queue.metrics(window_seconds=window_seconds, now=timestamp)
     config = load_tag_config(tag_config)
+    source_lag = posts["stream_source_lag_seconds"]
+    connected = bool(posts["stream_connected"])
     return {
         "generated_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
         "window_seconds": window_seconds,
@@ -51,11 +54,18 @@ def build_snapshot(
         },
         "stream": {
             "id": posts["stream_id"],
-            "connected": posts["stream_connected"],
+            "connected": connected,
+            "caught_up": (
+                connected
+                and source_lag is not None
+                and float(source_lag) <= caught_up_lag_seconds
+            ),
+            "caught_up_lag_seconds": caught_up_lag_seconds,
             "reconnect_total": posts["stream_reconnect_total"],
             "received_total": posts["stream_received_total"],
             "invalid_total": posts["stream_invalid_total"],
             "last_event_age_seconds": posts["stream_last_event_age_seconds"],
+            "source_lag_seconds": source_lag,
         },
         "queues": {
             "posts": {
@@ -106,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config/spoiler_tags.json"))
     parser.add_argument("--output", type=Path, default=Path("data/metrics.json"))
     parser.add_argument("--window-seconds", type=int, default=60)
+    parser.add_argument("--caught-up-lag-seconds", type=float, default=10.0)
     args = parser.parse_args(argv)
 
     snapshot = build_snapshot(
@@ -113,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         LabelQueue(args.label_database),
         args.config,
         window_seconds=args.window_seconds,
+        caught_up_lag_seconds=args.caught_up_lag_seconds,
     )
     write_snapshot(snapshot, args.output)
     print(json.dumps({"output": str(args.output), "generated_at": snapshot["generated_at"]}))

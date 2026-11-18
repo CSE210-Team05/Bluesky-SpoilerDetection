@@ -60,10 +60,13 @@ class PostReader:
 
     def process_event(self, event: dict[str, Any]) -> int:
         sequence, jobs = parse_jetstream_event(event, self.stream_id)
+        raw_time_us = event.get("time_us")
+        source_event_at = None if raw_time_us is None else int(raw_time_us) / 1_000_000
         return self.queue.enqueue_and_checkpoint(
             jobs,
             stream_id=self.stream_id,
             sequence=sequence,
+            source_event_at=source_event_at,
         )
 
     def run(self, events: Iterable[dict[str, Any]]) -> int:

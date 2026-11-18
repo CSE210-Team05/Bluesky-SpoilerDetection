@@ -12,6 +12,13 @@ function formatAge(seconds) {
   return `${(seconds / 3600).toFixed(1)}h oldest`;
 }
 
+function formatLag(seconds) {
+  if (seconds == null) return "source lag unavailable";
+  if (seconds < 1) return "<1s behind";
+  if (seconds < 60) return `${Math.round(seconds)}s behind`;
+  return `${(seconds / 60).toFixed(1)}m behind`;
+}
+
 function renderQueue(prefix, queue) {
   byId(`${prefix}-depth`).textContent = formatInteger(queue.available + queue.leased);
   byId(`${prefix}-age`).textContent = formatAge(queue.oldest_job_age_seconds);
@@ -63,18 +70,27 @@ function render(data) {
   const generated = new Date(data.generated_at);
   const ageSeconds = (Date.now() - generated.getTime()) / 1000;
   const stream = data.stream || {};
-  const eventAge = formatAge(
-    stream.last_event_age_seconds == null
-      ? null
-      : stream.last_event_age_seconds + Math.max(0, ageSeconds),
-  );
+  const eventAgeSeconds = stream.last_event_age_seconds == null
+    ? null
+    : stream.last_event_age_seconds + Math.max(0, ageSeconds);
+  const sourceLag = stream.source_lag_seconds == null
+    ? null
+    : stream.source_lag_seconds + Math.max(0, ageSeconds);
+  const caughtUpThreshold = Number(stream.caught_up_lag_seconds || 10);
+  const caughtUp = stream.connected
+    && sourceLag != null
+    && sourceLag <= caughtUpThreshold;
   const snapshotTime = generated.toLocaleTimeString();
   const staleAfterSeconds = Math.max(120, Number(data.window_seconds || 0) + 120);
-  byId("freshness").textContent = stream.connected
-    ? `Snapshot ${snapshotTime} · stream connected · ${eventAge}`
-    : `Snapshot ${snapshotTime} · stream disconnected`;
-  byId("freshness").title = `Received ${formatInteger(stream.received_total)} events; ${formatInteger(stream.reconnect_total)} reconnects`;
-  byId("status-dot").className = `status-dot ${stream.connected && ageSeconds <= staleAfterSeconds ? "live" : "stale"}`;
+  if (!stream.connected) {
+    byId("freshness").textContent = `Disconnected · snapshot ${snapshotTime}`;
+  } else if (caughtUp) {
+    byId("freshness").textContent = `Up to date · ${formatLag(sourceLag)}`;
+  } else {
+    byId("freshness").textContent = `Catching up · ${formatLag(sourceLag)}`;
+  }
+  byId("freshness").title = `Received ${formatInteger(stream.received_total)} events; ${formatInteger(stream.reconnect_total)} reconnects; latest event ${formatLag(eventAgeSeconds)}; snapshot ${snapshotTime}`;
+  byId("status-dot").className = `status-dot ${caughtUp && ageSeconds <= staleAfterSeconds ? "live" : "stale"}`;
   byId("error").hidden = true;
 }
 

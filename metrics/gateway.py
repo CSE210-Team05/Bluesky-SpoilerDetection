@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -224,13 +225,17 @@ class SnapshotProvider:
         tag_config: Path,
         *,
         window_seconds: int,
+        live_rate_window_seconds: float = 10.0,
+        caught_up_lag_seconds: float = 10.0,
         minimum_refresh_seconds: float = 0.5,
     ):
         self.post_queue = PostQueue(post_database)
         self.label_queue = LabelQueue(label_database)
         self.tag_config = tag_config
         self.window_seconds = window_seconds
+        self.caught_up_lag_seconds = caught_up_lag_seconds
         self.minimum_refresh_seconds = minimum_refresh_seconds
+        self.rate_tracker = LiveRateTracker(live_rate_window_seconds)
         self._lock = threading.Lock()
         self._snapshot: dict[str, Any] | None = None
         self._built_at = 0.0
@@ -239,15 +244,58 @@ class SnapshotProvider:
         with self._lock:
             now = time.time()
             if self._snapshot is None or now - self._built_at >= self.minimum_refresh_seconds:
-                self._snapshot = build_snapshot(
+                snapshot = build_snapshot(
                     self.post_queue,
                     self.label_queue,
                     self.tag_config,
                     window_seconds=self.window_seconds,
+                    caught_up_lag_seconds=self.caught_up_lag_seconds,
                     now=now,
                 )
+                self._snapshot = self.rate_tracker.update(snapshot, now=now)
                 self._built_at = now
             return self._snapshot
+
+
+class LiveRateTracker:
+    """Calculate responsive rates from monotonic lifetime-counter deltas."""
+
+    _RATE_TOTALS = {
+        "ingestion_per_second": "ingested",
+        "label_per_second": "labels_enqueued",
+        "publish_per_second": "published",
+        "detection_per_second": "detected",
+    }
+
+    def __init__(self, window_seconds: float = 10.0):
+        if window_seconds <= 0:
+            raise ValueError("live rate window must be positive")
+        self.window_seconds = window_seconds
+        self.samples: deque[tuple[float, dict[str, int]]] = deque()
+
+    def update(self, snapshot: dict[str, Any], *, now: float) -> dict[str, Any]:
+        totals = {
+            total_name: int(snapshot["totals"][total_name])
+            for total_name in self._RATE_TOTALS.values()
+        }
+        self.samples.append((now, totals))
+        cutoff = now - self.window_seconds
+        while len(self.samples) > 2 and self.samples[1][0] <= cutoff:
+            self.samples.popleft()
+
+        started_at, started_totals = self.samples[0]
+        elapsed = now - started_at
+        rates = {
+            rate_name: (
+                0.0
+                if elapsed <= 0
+                else max(0, totals[total_name] - started_totals[total_name]) / elapsed
+            )
+            for rate_name, total_name in self._RATE_TOTALS.items()
+        }
+        snapshot["rates"] = rates
+        snapshot["window_seconds"] = self.window_seconds
+        return snapshot
 
 
 class MetricsHTTPServer(ThreadingHTTPServer):
@@ -385,6 +433,8 @@ def run_gateway(args: argparse.Namespace) -> int:
         args.label_database,
         args.config,
         window_seconds=args.window_seconds,
+        live_rate_window_seconds=args.live_rate_window_seconds,
+        caught_up_lag_seconds=args.caught_up_lag_seconds,
     )
     try:
         server = MetricsHTTPServer(
@@ -476,6 +526,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cloudflared", default="cloudflared")
     parser.add_argument("--tunnel-timeout", type=float, default=30.0)
     parser.add_argument("--window-seconds", type=int, default=300)
+    parser.add_argument("--live-rate-window-seconds", type=float, default=10.0)
+    parser.add_argument("--caught-up-lag-seconds", type=float, default=10.0)
     parser.add_argument("--force-lease", action="store_true")
     args = parser.parse_args(argv)
     try:

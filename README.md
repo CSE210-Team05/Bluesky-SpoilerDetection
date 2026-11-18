@@ -105,9 +105,22 @@ origin, and rate window are configured in `config/pipeline.json`:
   "token_env": "GITHUB_METRICS_TOKEN",
   "host": "127.0.0.1",
   "port": 8765,
+  "live_rate_window_seconds": 10,
+  "caught_up_lag_seconds": 10,
   "allowed_origin": "https://cse210-team05.github.io"
 }
 ```
+
+Dashboard throughput uses counter deltas over a short ten-second in-memory
+window. The persistent five-minute SQLite buckets remain available for coarse
+history, but no longer make the live display take minutes to reflect recovery
+or a change in incoming demand.
+
+Reader health is independent of throughput. Jetstream's `time_us` cursor is
+stored with stream health, and the dashboard reports **Up to date** when the
+reader is connected and the newest source event is no more than ten seconds
+behind wall-clock time. A low rate with an up-to-date cursor means current
+demand is low; **Catching up** means the reader is still consuming older events.
 
 The OS socket bind rejects a second gateway on the same host. A SHA-guarded
 registry lease rejects a coordinator on another host if one is already active.

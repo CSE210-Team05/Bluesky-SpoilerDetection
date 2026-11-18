@@ -4,6 +4,7 @@ import base64
 import json
 from io import BytesIO
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -15,7 +16,12 @@ from Bluesky_interface.post_fetcher_core.post_fetcher import (
 from Bluesky_interface.post_fetcher_interface import PostJob, PostQueue
 from coordinator import build_component_specs, load_config, load_supervision_settings
 from label_publisher.publisher import DryRunLabelClient, process_once as publish_once
-from metrics.gateway import GitHubEndpointRegistry, LeaseUnavailable, MetricsHTTPServer
+from metrics.gateway import (
+    GitHubEndpointRegistry,
+    LeaseUnavailable,
+    LiveRateTracker,
+    MetricsHTTPServer,
+)
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_core.spoiler_detector import (
     KeywordSpoilerDetector,
@@ -58,12 +64,37 @@ def test_post_queue_checkpoints_and_deduplicates(tmp_path: Path) -> None:
     assert queue.metrics(now=112.0)["available"] == 0
 
 
+def test_post_queue_migrates_existing_stream_health_for_source_lag(tmp_path: Path) -> None:
+    database = tmp_path / "posts.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE stream_health (
+                stream_id TEXT PRIMARY KEY,
+                connected INTEGER NOT NULL DEFAULT 0,
+                reconnect_count INTEGER NOT NULL DEFAULT 0,
+                received_total INTEGER NOT NULL DEFAULT 0,
+                invalid_total INTEGER NOT NULL DEFAULT 0,
+                last_event_at REAL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+
+    PostQueue(database)
+
+    with sqlite3.connect(database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(stream_health)")}
+    assert "source_event_at" in columns
+
+
 def test_reader_accepts_only_post_creates_and_checkpoints_every_event(tmp_path: Path) -> None:
     queue = PostQueue(tmp_path / "posts.sqlite3")
     reader = PostReader(queue, "jetstream-test")
     create = {
         "kind": "commit",
         "seq": 10,
+        "time_us": 10_000_000,
         "did": "did:plc:alice",
         "commit": {
             "operation": "create",
@@ -89,6 +120,7 @@ def test_reader_accepts_only_post_creates_and_checkpoints_every_event(tmp_path: 
     assert reader.process_event(create) == 1
     assert reader.process_event(update) == 0
     assert queue.get_cursor("jetstream-test") == 11
+    assert queue.metrics(now=11.0)["stream_source_lag_seconds"] == 1.0
     claimed = queue.claim("detector", now=10_000_000_000.0)
     assert claimed[0].job.post_uri == "at://did:plc:alice/app.bsky.feed.post/abc"
     assert claimed[0].job.post_cid == "bafy-post"
@@ -189,13 +221,21 @@ def test_metrics_snapshot_combines_both_interfaces(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     job = post_job()
-    posts.enqueue_and_checkpoint([job], stream_id="test-stream", sequence=1, now=100.0)
+    posts.enqueue_and_checkpoint(
+        [job],
+        stream_id="test-stream",
+        sequence=1,
+        source_event_at=99.0,
+        now=100.0,
+    )
 
-    snapshot = build_snapshot(posts, labels, config, window_seconds=60, now=110.0)
+    snapshot = build_snapshot(posts, labels, config, window_seconds=60, now=105.0)
     assert snapshot["configuration"]["tags"] == ["finale"]
     assert snapshot["queues"]["posts"]["available"] == 1
     assert snapshot["totals"]["ingested"] == 1
     assert snapshot["rates"]["ingestion_per_second"] == 1 / 60
+    assert snapshot["stream"]["caught_up"]
+    assert snapshot["stream"]["source_lag_seconds"] == 6.0
 
 
 def test_parser_rejects_missing_cursor() -> None:
@@ -273,6 +313,33 @@ def test_metrics_http_port_disallows_socket_reuse() -> None:
     assert MetricsHTTPServer.allow_reuse_port is False
 
 
+def test_live_rates_respond_to_recent_counter_changes() -> None:
+    tracker = LiveRateTracker(window_seconds=10)
+
+    def snapshot(ingested: int, detected: int, labeled: int, published: int) -> dict:
+        return {
+            "rates": {},
+            "totals": {
+                "ingested": ingested,
+                "detected": detected,
+                "labels_enqueued": labeled,
+                "published": published,
+            },
+        }
+
+    first = tracker.update(snapshot(100, 90, 80, 70), now=100.0)
+    second = tracker.update(snapshot(150, 140, 130, 120), now=105.0)
+
+    assert first["rates"]["ingestion_per_second"] == 0
+    assert second["rates"] == {
+        "ingestion_per_second": 10,
+        "label_per_second": 10,
+        "publish_per_second": 10,
+        "detection_per_second": 10,
+    }
+    assert second["window_seconds"] == 10
+
+
 def test_coordinator_builds_complete_process_group(tmp_path: Path) -> None:
     config = load_config(Path("config/pipeline.json"))
     source = tmp_path / "events.jsonl"
@@ -332,6 +399,8 @@ def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
     assert not metrics.restart
     assert metrics.command[metrics.command.index("--host") + 1] == "127.0.0.1"
     assert metrics.command[metrics.command.index("--port") + 1] == "8765"
+    assert metrics.command[metrics.command.index("--live-rate-window-seconds") + 1] == "10"
+    assert metrics.command[metrics.command.index("--caught-up-lag-seconds") + 1] == "10"
 
 
 def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
@@ -345,7 +414,9 @@ def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
     ) in app
     assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=3"' in index
+    assert 'src="app.js?v=4"' in index
+    assert "Up to date" in app
+    assert "Catching up" in app
     assert '"docs/**"' not in workflow
     assert "docs/metrics.json" not in workflow
     assert "docs/metrics-endpoint.json" not in workflow

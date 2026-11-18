@@ -108,6 +108,10 @@ def build_component_specs(
             str(metrics.get("tunnel_timeout_seconds", 30)),
             "--window-seconds",
             str(metrics.get("window_seconds", 300)),
+            "--live-rate-window-seconds",
+            str(metrics.get("live_rate_window_seconds", 10)),
+            "--caught-up-lag-seconds",
+            str(metrics.get("caught_up_lag_seconds", 10)),
         ]
         if force_metrics_lease:
             command.append("--force-lease")

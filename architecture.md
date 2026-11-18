@@ -243,6 +243,17 @@ dashboard waits for an active registration and then polls the live endpoint
 once per second. Metric values are never committed and the frontend is not
 redeployed when they change.
 
+The gateway calculates displayed throughput from lifetime-counter deltas over
+a short in-memory window. This keeps the dashboard responsive without adding
+per-second metric rows or writes to either SQLite queue database. Persistent
+minute buckets remain a coarse historical record rather than the live rate
+source.
+
+Throughput is not itself a reader-health signal. Jetstream's source event
+timestamp is checkpointed with stream health, allowing the dashboard to show
+`Up to date`, `Catching up`, or `Disconnected` from measured cursor lag. Thus a
+low arrival rate can be distinguished from a reader that is falling behind.
+
 The local HTTP bind is exclusive. Cross-machine exclusivity is enforced with a
 GitHub Contents API compare-and-swap lease: only the coordinator that updates
 the registry from the observed file SHA owns the public endpoint. A second
