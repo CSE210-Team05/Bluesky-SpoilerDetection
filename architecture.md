@@ -292,8 +292,11 @@ not compete with ingestion and publication for SQLite I/O.
 
 Throughput is not itself a reader-health signal. Jetstream's source event
 timestamp is checkpointed with stream health, allowing the dashboard to show
-`Up to date`, `Catching up`, or `Disconnected` from measured cursor lag. Thus a
-low arrival rate can be distinguished from a reader that is falling behind.
+`Up to date`, `Catching up`, or `Disconnected` from measured cursor lag. A
+connected reader without a timestamped source event reports `Waiting for first
+source event` because its lag is not measurable yet. Queue depth is not used as
+a proxy for source lag. Thus a low arrival rate can be distinguished from a
+reader that is falling behind.
 
 The local HTTP bind is exclusive, so a second coordinator cannot claim the same
 dashboard address. The server enables address reuse only so a cleanly stopped

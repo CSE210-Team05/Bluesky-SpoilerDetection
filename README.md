@@ -144,7 +144,10 @@ Reader health is independent of throughput. Jetstream's `time_us` cursor is
 stored with stream health, and the dashboard reports **Up to date** when the
 reader is connected and the newest source event is no more than ten seconds
 behind wall-clock time. A low rate with an up-to-date cursor means current
-demand is low; **Catching up** means the reader is still consuming older events.
+demand is low; **Catching up** means a known source timestamp is older than the
+configured threshold. A newly connected reader with no source event yet reports
+**Connected — waiting for first source event** instead. Empty databases and
+queues describe downstream work, not source lag, so they do not imply catch-up.
 If the WebSocket remains open but delivers no events for 30 seconds, the reader
 forces a reconnect from its durable cursor on the next configured Jetstream
 instance instead of remaining silently stuck on one unhealthy host.

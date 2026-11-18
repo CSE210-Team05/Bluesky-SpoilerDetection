@@ -42,6 +42,9 @@ returns the last completed aggregate snapshot.
 An **Up to date** stream has an active connection and a recent source cursor.
 **Catching up** means events are flowing but their source timestamps lag wall
 clock time. A low rate while up to date can simply mean low incoming demand.
+Before the first timestamped source event arrives, the dashboard reports
+**Connected — waiting for first source event** because source lag is not yet
+measurable. Empty databases and queues do not mean the source reader is behind.
 Rising queue age or depth means a downstream stage is not keeping pace.
 
 Use `Ctrl-C` for coordinated shutdown. A finite replay exits automatically

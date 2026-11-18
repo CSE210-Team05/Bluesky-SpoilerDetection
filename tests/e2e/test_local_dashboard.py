@@ -9,13 +9,20 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+from types import SimpleNamespace
 from typing import TextIO
 from urllib.error import URLError
 from urllib.request import urlopen
 
 from playwright.sync_api import Page, expect
 import pytest
+
+from Bluesky_interface.post_fetcher_interface import PostQueue
+from metrics.gateway import MetricsHTTPServer
+from metrics.snapshot import build_snapshot
+from spoiler_interface.spoiler_interface import LabelQueue
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +84,54 @@ def _stop_coordinator(process: subprocess.Popen[str], writer: TextIO | None) -> 
         process.kill()
         output, _ = process.communicate(timeout=5)
     return output
+
+
+@pytest.mark.e2e
+def test_dashboard_shows_connected_waiting_before_first_source_event(
+    page: Page,
+    tmp_path: Path,
+) -> None:
+    posts = PostQueue(tmp_path / "waiting-posts.sqlite3")
+    labels = LabelQueue(tmp_path / "waiting-labels.sqlite3")
+    posts.set_stream_connected("quiet-stream", True)
+    snapshot = build_snapshot(
+        posts,
+        labels,
+        PROJECT_ROOT / "config" / "spoiler_tags.json",
+    )
+    provider = SimpleNamespace(
+        get=lambda: snapshot,
+        status=lambda: {
+            "snapshot_ready": True,
+            "snapshot_age_seconds": 0.0,
+            "snapshot_error": None,
+        },
+    )
+    server = MetricsHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard_directory=PROJECT_ROOT / "docs",
+        snapshot_provider=provider,
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+
+    try:
+        response = page.goto(origin, wait_until="domcontentloaded")
+
+        assert response is not None and response.ok
+        expect(page.locator("#health-title")).to_have_text(
+            "Connected — waiting for first source event"
+        )
+        expect(page.locator("#freshness")).to_have_text(
+            "Connected · waiting for source data"
+        )
+        expect(page.locator("#source-lag")).to_have_text("Unavailable")
+        expect(page.locator("#health-title")).not_to_contain_text("catching up")
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
 
 
 @pytest.mark.e2e

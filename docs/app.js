@@ -144,8 +144,9 @@ function renderHealth(stream, generated, queues) {
     ? null
     : Number(stream.last_event_age_seconds) + ageSeconds;
   const threshold = Number(stream.caught_up_lag_seconds || 10);
-  const caughtUp = Boolean(stream.connected) && sourceLag != null && sourceLag <= threshold;
-  const sourceStalled = Boolean(stream.connected)
+  const connected = Boolean(stream.connected);
+  const caughtUp = connected && sourceLag != null && sourceLag <= threshold;
+  const sourceStalled = connected
     && lastEventAge != null
     && lastEventAge > 30;
   const maximumQueueAge = Math.max(
@@ -158,7 +159,7 @@ function renderHealth(stream, generated, queues) {
   ring.className = "health-ring";
   statusDot.className = "status-dot";
 
-  if (!stream.connected || ageSeconds > staleAfterSeconds) {
+  if (!connected || ageSeconds > staleAfterSeconds) {
     ring.classList.add("error");
     statusDot.classList.add("stale");
     byId("health-ring-label").textContent = "Offline";
@@ -172,14 +173,34 @@ function renderHealth(stream, generated, queues) {
     byId("health-title").textContent = "Reader stream is not advancing";
     byId("health-description").textContent = "The gateway is responsive, but Jetstream has delivered no recent events. The reader will reconnect automatically.";
     byId("freshness").textContent = `No source events for ${formatLag(lastEventAge)}`;
-  } else if (!caughtUp || maximumQueueAge > 60) {
+  } else if (maximumQueueAge > 60) {
+    ring.classList.add("warning");
+    statusDot.classList.add("warning");
+    byId("health-ring-label").textContent = "Backlog";
+    byId("health-title").textContent = "Backlog needs attention";
+    byId("health-description").textContent = "Work is flowing, but the oldest queued item is outside the 60-second target.";
+    byId("freshness").textContent = `Oldest queued item · ${formatLag(maximumQueueAge)}`;
+  } else if (sourceLag == null) {
+    const waitingForFirstEvent = Number(stream.received_total || 0) === 0
+      && lastEventAge == null;
+    ring.classList.add("healthy");
+    statusDot.classList.add("live");
+    byId("health-ring-label").textContent = "Connected";
+    byId("health-title").textContent = waitingForFirstEvent
+      ? "Connected — waiting for first source event"
+      : "Connected — source lag unavailable";
+    byId("health-description").textContent = waitingForFirstEvent
+      ? "The reader is connected, but no source event has arrived yet. Empty queues do not indicate lag."
+      : "Events are arriving without a source timestamp, so catch-up lag cannot be calculated.";
+    byId("freshness").textContent = waitingForFirstEvent
+      ? "Connected · waiting for source data"
+      : "Connected · source lag unavailable";
+  } else if (!caughtUp) {
     ring.classList.add("warning");
     statusDot.classList.add("warning");
     byId("health-ring-label").textContent = "Syncing";
-    byId("health-title").textContent = maximumQueueAge > 60 ? "Backlog needs attention" : "Pipeline is catching up";
-    byId("health-description").textContent = maximumQueueAge > 60
-      ? "Work is flowing, but the oldest queued item is outside the 60-second target."
-      : "The reader is connected and processing older source events.";
+    byId("health-title").textContent = "Pipeline is catching up";
+    byId("health-description").textContent = "The reader is connected and processing older source events.";
     byId("freshness").textContent = `Catching up · ${formatLag(sourceLag)} behind`;
   } else {
     ring.classList.add("healthy");
