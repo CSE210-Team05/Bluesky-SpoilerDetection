@@ -340,9 +340,9 @@ the active spoiler tags or any runtime configuration.
 - GitHub Pages may read only the aggregate `/metrics` endpoint through the
   outbound tunnel. SQLite files and coordinator control interfaces remain
   private and the local HTTP server listens only on loopback.
-- The GitHub write token exists only on the pipeline machine, is loaded from an
-  environment variable, and is limited to repository Contents write access. It
-  is used for endpoint discovery and exclusive leasing, not metric delivery.
+- For the demo, the GitHub write token is embedded in the metrics gateway and
+  limited to repository Contents write access. It is used for endpoint
+  discovery and exclusive leasing, not metric delivery.
 - Buffering, storage, and transport details stay behind the interfaces so they
   can change without affecting consumers.
 - Data passed across a boundary should use an explicit, shared contract rather
@@ -357,7 +357,7 @@ the active spoiler tags or any runtime configuration.
 - Choose the persistent idempotency key for publication, likely the combination
   of post URI, CID, and label value.
 - Define how completed or failed label publications are recorded.
-- Provision the fine-grained GitHub token and `cloudflared` executable on each
-  machine permitted to run the coordinator.
+- Provision the `cloudflared` executable on each machine permitted to run the
+  coordinator.
 - Establish measured SQLite queue-depth, lock-wait, and write-latency thresholds
   that would trigger migration to an external queue broker.

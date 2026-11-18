@@ -13,7 +13,6 @@ from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import os
 from pathlib import Path
 import queue
 import re
@@ -35,6 +34,7 @@ from spoiler_interface.spoiler_interface import LabelQueue
 
 
 API_VERSION = "2022-11-28"
+DEMO_GITHUB_TOKEN = "REVOKED_GITHUB_TOKEN"
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
@@ -442,10 +442,6 @@ class QuickTunnel:
 
 
 def run_gateway(args: argparse.Namespace) -> int:
-    token = os.environ.get(args.token_env)
-    if not token:
-        raise RuntimeError(f"environment variable {args.token_env} is not set")
-
     instance_id_path = args.instance_id_file or (
         args.post_database.parent / ".metrics-instance-id"
     )
@@ -475,7 +471,7 @@ def run_gateway(args: argparse.Namespace) -> int:
         path=args.registry_path,
         branch=args.registry_branch,
         source_branch=args.registry_source_branch,
-        token=token,
+        token=DEMO_GITHUB_TOKEN,
     )
     tunnel = QuickTunnel(args.cloudflared, f"http://{args.host}:{args.port}")
     stop_requested = threading.Event()
@@ -544,7 +540,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry-path", default="docs/metrics-endpoint.json")
     parser.add_argument("--registry-branch", default="live-metrics-endpoint-registry")
     parser.add_argument("--registry-source-branch", default="main")
-    parser.add_argument("--token-env", default="GITHUB_METRICS_TOKEN")
     parser.add_argument(
         "--instance-id-file",
         type=Path,

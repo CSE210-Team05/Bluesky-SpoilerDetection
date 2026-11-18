@@ -95,8 +95,6 @@ def build_component_specs(
             str(metrics.get("registry_branch", "live-metrics-endpoint-registry")),
             "--registry-source-branch",
             str(metrics.get("registry_source_branch", "main")),
-            "--token-env",
-            str(metrics.get("token_env", "GITHUB_METRICS_TOKEN")),
             "--host",
             str(metrics.get("host", "127.0.0.1")),
             "--port",

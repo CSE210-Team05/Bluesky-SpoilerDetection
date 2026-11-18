@@ -95,24 +95,15 @@ using **Deploy from a branch** and publishing the repository root. Change the
 Pages source to **GitHub Actions**. A root `index.html` redirect is included as
 a fallback, but the Actions source is the intended deployment mode.
 
-Create a fine-grained token limited to this repository with **Contents: write**
-permission. Store it only on the pipeline machine. The gateway uses it to
-create the `live-metrics-endpoint-registry` branch and atomically claim the single active
-endpoint; it is not used for publishing metric snapshots:
-
-```shell
-export GITHUB_METRICS_TOKEN="..."
-```
-
-The token name, repository, endpoint registry, local port, allowed browser
-origin, and rate window are configured in `config/pipeline.json`:
+For this demo, the fine-grained GitHub token is embedded directly in the
+metrics gateway. The repository, endpoint registry, local port, allowed
+browser origin, and rate window are configured in `config/pipeline.json`:
 
 ```json
 "metrics": {
   "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
   "registry_branch": "live-metrics-endpoint-registry",
   "registry_path": "docs/metrics-endpoint.json",
-  "token_env": "GITHUB_METRICS_TOKEN",
   "host": "127.0.0.1",
   "port": 8765,
   "live_rate_window_seconds": 10,

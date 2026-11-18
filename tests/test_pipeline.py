@@ -487,9 +487,8 @@ def test_coordinator_builds_complete_process_group(tmp_path: Path) -> None:
 
     assert [spec.name for spec in specs] == [
         "metrics",
-        "detector-1",
-        "detector-2",
-        "publisher-1",
+        *(f"detector-{index + 1}" for index in range(config["detectors"]["workers"])),
+        *(f"publisher-{index + 1}" for index in range(config["publishers"]["workers"])),
         "reader",
     ]
     assert specs[-1].is_reader
@@ -530,7 +529,6 @@ def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
     assert pipeline["metrics"]["repository"] == "CSE210-Team05/Bluesky-SpoilerDetection"
     assert pipeline["metrics"]["registry_path"] == "docs/metrics-endpoint.json"
     assert pipeline["metrics"]["registry_branch"] == "live-metrics-endpoint-registry"
-    assert pipeline["metrics"]["token_env"] == "GITHUB_METRICS_TOKEN"
     assert "metrics.gateway" in metrics.command
     assert metrics.critical
     assert not metrics.restart
