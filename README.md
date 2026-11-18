@@ -1,8 +1,12 @@
 # Bluesky Spoiler Detection
 
-[Project documentation](documentation/index.md) covers the pipeline contract,
-operations, and enforced quality gates. CI also publishes a rendered HTML copy
-as the `rendered-documentation` workflow artifact.
+[![Documentation site](https://github.com/CSE210-Team05/Bluesky-SpoilerDetection/actions/workflows/documentation.yml/badge.svg)](https://github.com/CSE210-Team05/Bluesky-SpoilerDetection/actions/workflows/documentation.yml)
+
+The [rendered project documentation](https://cse210-team05.github.io/Bluesky-SpoilerDetection/)
+covers the pipeline contract, operations, and enforced quality gates. Its source
+is versioned under [`documentation/`](documentation/index.md), validated on every
+pull request, and published to GitHub Pages after documentation changes reach
+`main`.
 
 First-pass implementation of the queue-based pipeline described in
 [`architecture.md`](architecture.md):
@@ -66,9 +70,9 @@ to the configured limit.
 
 ## Local metrics dashboard
 
-The dashboard is deliberately local for now. The coordinator serves the page
-and its live JSON data from the same loopback-only HTTP server; it does not use
-GitHub Pages, a GitHub token, or a Cloudflare tunnel.
+The live dashboard is deliberately local for now. The coordinator serves the
+page and its live JSON data from the same loopback-only HTTP server; it does not
+use the public documentation site, a GitHub token, or a Cloudflare tunnel.
 
 Start the coordinator, then open:
 

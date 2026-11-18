@@ -917,3 +917,19 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert "Reader stream is not advancing" in app
     assert not Path(".github/workflows/deploy-pages.yml").exists()
     assert not Path("docs/metrics-endpoint.json").exists()
+
+
+def test_rendered_documentation_has_a_public_deployment() -> None:
+    workflow = Path(".github/workflows/documentation.yml").read_text(
+        encoding="utf-8"
+    )
+    readme = Path("README.md").read_text(encoding="utf-8")
+    mkdocs = Path("mkdocs.yml").read_text(encoding="utf-8")
+
+    site_url = "https://cse210-team05.github.io/Bluesky-SpoilerDetection/"
+    assert "python -m mkdocs build --strict" in workflow
+    assert "actions/upload-pages-artifact@v5" in workflow
+    assert "actions/deploy-pages@v5" in workflow
+    assert site_url in workflow
+    assert site_url in readme
+    assert f"site_url: {site_url}" in mkdocs
