@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import base64
 import asyncio
-import json
 from io import BytesIO
+import json
 from pathlib import Path
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
+from urllib.request import urlopen
 
 import pytest
 
@@ -17,17 +18,26 @@ from Bluesky_interface.post_fetcher_core.post_fetcher import (
     parse_jetstream_event,
     receive_jetstream_message,
 )
-from Bluesky_interface.post_fetcher_interface import PostJob, PostQueue
-from coordinator import build_component_specs, load_config, load_supervision_settings
+from Bluesky_interface.post_fetcher_interface import (
+    PostJob,
+    PostQueue,
+    ShardedPostQueue,
+    rectify_post_shards,
+)
+from coordinator import (
+    ComponentSpec,
+    Coordinator,
+    SupervisionSettings,
+    build_component_specs,
+    load_config,
+    load_supervision_settings,
+)
 from label_publisher.publisher import DryRunLabelClient, process_once as publish_once
 from metrics.gateway import (
-    GitHubEndpointRegistry,
-    LeaseUnavailable,
     LiveRateTracker,
     MetricsHTTPServer,
-    QuickTunnel,
     SnapshotProvider,
-    load_or_create_instance_id,
+    run_gateway,
 )
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_core.spoiler_detector import (
@@ -38,7 +48,9 @@ from spoiler_interface.spoiler_core.spoiler_detector import (
 from spoiler_interface.spoiler_interface import (
     LabelJob,
     LabelQueue,
+    ShardedLabelQueue,
     SpoilerWorkerInterface,
+    rectify_label_shards,
 )
 
 
@@ -109,6 +121,146 @@ def test_metrics_adapters_can_open_without_schema_writes(tmp_path: Path) -> None
 
     assert not post_database.exists()
     assert not label_database.exists()
+
+
+def test_post_database_rectification_migrates_backlog_and_replaces_generation(
+    tmp_path: Path,
+) -> None:
+    legacy_database = tmp_path / "posts.sqlite3"
+    legacy = PostQueue(legacy_database)
+    jobs = [post_job(sequence) for sequence in range(1, 21)]
+    for job in jobs:
+        legacy.enqueue_and_checkpoint(
+            [job],
+            stream_id="test-stream",
+            sequence=job.sequence,
+            source_event_at=float(job.sequence),
+            now=float(job.sequence),
+        )
+    completed = legacy.claim("completed-worker", limit=3, now=30.0)
+    for delivery in completed:
+        assert legacy.acknowledge(
+            delivery.job.job_id,
+            "completed-worker",
+            outcome="positive",
+            now=31.0,
+        )
+    abandoned = legacy.claim("stopped-worker", limit=1, now=32.0)
+    assert len(abandoned) == 1
+
+    four_shards = rectify_post_shards(legacy_database, 4)
+    sharded = ShardedPostQueue(four_shards, migrate=False)
+    migrated_metrics = sharded.metrics(now=33.0)
+
+    assert len(four_shards) == 4
+    assert not legacy_database.exists()
+    assert (tmp_path / "posts.sqlite3.shards.json").is_file()
+    assert migrated_metrics["ingested_total"] == 20
+    assert migrated_metrics["acknowledged_total"] == 3
+    assert migrated_metrics["available"] == 17
+    assert migrated_metrics["leased"] == 0
+    assert sharded.get_cursor("test-stream") == 20
+
+    remaining_ids: set[str] = set()
+    populated_shards = 0
+    for index, shard in enumerate(sharded.shards):
+        deliveries = shard.claim(f"detector-{index}", limit=100, now=34.0)
+        if deliveries:
+            populated_shards += 1
+        remaining_ids.update(delivery.job.job_id for delivery in deliveries)
+    assert remaining_ids == {job.job_id for job in jobs[3:]}
+    assert populated_shards > 1
+
+    assert rectify_post_shards(legacy_database, 4) == four_shards
+    two_shards = rectify_post_shards(legacy_database, 2)
+    reshaped = ShardedPostQueue(two_shards, migrate=False)
+
+    assert len(two_shards) == 2
+    assert all(not path.exists() for path in four_shards)
+    assert reshaped.metrics(now=35.0)["available"] == 17
+
+
+def test_failed_post_rectification_keeps_legacy_database(tmp_path: Path) -> None:
+    legacy_database = tmp_path / "posts.sqlite3"
+    legacy_database.write_bytes(b"not a sqlite database")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        rectify_post_shards(legacy_database, 2)
+
+    assert legacy_database.read_bytes() == b"not a sqlite database"
+    assert not (tmp_path / "posts.sqlite3.shards.json").exists()
+
+
+def test_label_database_rectification_preserves_backlog_and_publication_history(
+    tmp_path: Path,
+) -> None:
+    legacy_database = tmp_path / "labels.sqlite3"
+    legacy = LabelQueue(legacy_database)
+    jobs = [
+        LabelJob.create(
+            post_uri=f"at://did:plc:test/app.bsky.feed.post/{index}",
+            post_cid=f"cid-{index}",
+            label_value="spoiler",
+            detector_version="test-v1",
+            detected_at=float(index),
+        )
+        for index in range(1, 21)
+    ]
+    for index, job in enumerate(jobs, start=1):
+        assert legacy.enqueue(job, now=float(index))
+    completed = legacy.claim("completed-publisher", limit=3, now=30.0)
+    for delivery in completed:
+        assert legacy.acknowledge(
+            delivery.job.job_id,
+            "completed-publisher",
+            now=31.0,
+        )
+    assert len(legacy.claim("stopped-publisher", limit=1, now=32.0)) == 1
+
+    four_shards = rectify_label_shards(legacy_database, 4)
+    sharded = ShardedLabelQueue(four_shards, migrate=False)
+    migrated_metrics = sharded.metrics(now=33.0)
+
+    assert len(four_shards) == 4
+    assert not legacy_database.exists()
+    assert (tmp_path / "labels.sqlite3.shards.json").is_file()
+    assert migrated_metrics["enqueued_total"] == 20
+    assert migrated_metrics["published_total"] == 3
+    assert migrated_metrics["available"] == 17
+    assert migrated_metrics["leased"] == 0
+
+    published_ids: set[str] = set()
+    remaining_ids: set[str] = set()
+    for index, shard in enumerate(sharded.shards):
+        with sqlite3.connect(shard.database) as connection:
+            published_ids.update(
+                str(row[0]) for row in connection.execute("SELECT job_id FROM published_labels")
+            )
+        remaining_ids.update(
+            delivery.job.job_id
+            for delivery in shard.claim(f"publisher-{index}", limit=100, now=34.0)
+        )
+    assert published_ids == {job.job_id for job in jobs[:3]}
+    assert remaining_ids == {job.job_id for job in jobs[3:]}
+
+    assert rectify_label_shards(legacy_database, 4) == four_shards
+    two_shards = rectify_label_shards(legacy_database, 2)
+    reshaped = ShardedLabelQueue(two_shards, migrate=False)
+
+    assert len(two_shards) == 2
+    assert all(not path.exists() for path in four_shards)
+    assert reshaped.metrics(now=35.0)["available"] == 17
+
+
+def test_failed_label_rectification_keeps_legacy_database(tmp_path: Path) -> None:
+    legacy_database = tmp_path / "labels.sqlite3"
+    legacy_database.write_bytes(b"not a sqlite database")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        rectify_label_shards(legacy_database, 2)
+
+    assert legacy_database.read_bytes() == b"not a sqlite database"
+    assert not (tmp_path / "labels.sqlite3.shards.json").exists()
 
 
 def test_reader_accepts_only_post_creates_and_checkpoints_every_event(tmp_path: Path) -> None:
@@ -346,13 +498,58 @@ def test_metrics_snapshot_combines_both_interfaces(tmp_path: Path) -> None:
         now=100.0,
     )
 
-    snapshot = build_snapshot(posts, labels, config, window_seconds=60, now=105.0)
+    snapshot = build_snapshot(
+        posts,
+        labels,
+        config,
+        window_seconds=60,
+        detector_workers=10,
+        publisher_workers=2,
+        now=105.0,
+    )
     assert snapshot["configuration"]["tags"] == ["finale"]
     assert snapshot["queues"]["posts"]["available"] == 1
     assert snapshot["totals"]["ingested"] == 1
     assert snapshot["rates"]["ingestion_per_second"] == 1 / 60
     assert snapshot["stream"]["caught_up"]
     assert snapshot["stream"]["source_lag_seconds"] == 6.0
+    assert snapshot["workers"]["detectors"]["configured"] == 10
+    assert snapshot["workers"]["detectors"]["shards"] == 1
+    assert snapshot["workers"]["publishers"]["configured"] == 2
+    assert snapshot["workers"]["window_seconds"] == 60
+
+
+def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
+    tmp_path: Path,
+) -> None:
+    posts = PostQueue(tmp_path / "worker-posts.sqlite3")
+    post = post_job()
+    posts.enqueue_and_checkpoint(
+        [post],
+        stream_id="test-stream",
+        sequence=1,
+        now=100.0,
+    )
+    assert len(posts.claim("detector-a", now=105.0)) == 1
+    post_metrics = posts.metrics(window_seconds=60, now=105.0)
+
+    labels = LabelQueue(tmp_path / "worker-labels.sqlite3")
+    label = LabelJob.create(
+        post_uri=post.post_uri,
+        post_cid=post.post_cid,
+        label_value="spoiler",
+        detector_version="test-v1",
+    )
+    assert labels.enqueue(label, now=200.0)
+    assert len(labels.claim("publisher-a", now=203.0)) == 1
+    label_metrics = labels.metrics(window_seconds=60, now=203.0)
+
+    assert post_metrics["busy_workers"] == 1
+    assert post_metrics["average_queue_wait_seconds"] == 5.0
+    assert float(post_metrics["average_claim_seconds"]) >= 0
+    assert label_metrics["busy_workers"] == 1
+    assert label_metrics["average_queue_wait_seconds"] == 3.0
+    assert float(label_metrics["average_claim_seconds"]) >= 0
 
 
 def test_parser_rejects_missing_cursor() -> None:
@@ -364,148 +561,108 @@ def test_parser_rejects_missing_cursor() -> None:
         raise AssertionError("missing cursor was accepted")
 
 
-def test_metrics_registry_lease_uses_compare_and_swap() -> None:
-    requests = []
-    endpoint = {
-        "state": "offline",
-        "instance_id": None,
-        "public_url": None,
-        "updated_at": None,
-    }
+def test_metrics_http_port_reuses_closed_address_not_active_listener(
+    tmp_path: Path,
+) -> None:
+    dashboard = tmp_path / "restart-dashboard"
+    dashboard.mkdir()
+    (dashboard / "index.html").write_text("restart test", encoding="utf-8")
+    (dashboard / "app.js").write_text("", encoding="utf-8")
+    (dashboard / "styles.css").write_text("", encoding="utf-8")
 
-    def opener(request, *, timeout):
-        requests.append((request, timeout))
-        if "/git/refs/heads/live-metrics-endpoint-registry" in request.full_url:
-            return BytesIO(b'{"object":{"sha":"branch-sha"}}')
-        if request.method == "GET":
-            encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
-            return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
-        return BytesIO(b'{"content":{"sha":"lease-sha"}}')
+    class ReadyProvider:
+        @staticmethod
+        def status() -> dict:
+            return {
+                "snapshot_ready": True,
+                "snapshot_age_seconds": 0.1,
+                "snapshot_error": None,
+            }
 
-    registry = GitHubEndpointRegistry(
-        repository="owner/repository",
-        path="docs/metrics-endpoint.json",
-        branch="live-metrics-endpoint-registry",
-        source_branch="main",
-        token="secret",
-        opener=opener,
+        @staticmethod
+        def get() -> dict:
+            return {"generated_at": "test"}
+
+    first = MetricsHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard_directory=dashboard,
+        snapshot_provider=ReadyProvider(),  # type: ignore[arg-type]
     )
+    port = int(first.server_address[1])
+    thread = threading.Thread(target=first.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(OSError):
+            MetricsHTTPServer(
+                ("127.0.0.1", port),
+                dashboard_directory=dashboard,
+                snapshot_provider=ReadyProvider(),  # type: ignore[arg-type]
+            )
+        with urlopen(f"http://127.0.0.1:{port}/", timeout=1) as response:
+            assert response.read() == b"restart test"
+    finally:
+        first.shutdown()
+        first.server_close()
+        thread.join(timeout=1)
 
-    assert registry.acquire("instance-a") == "lease-sha"
-    update = json.loads(requests[-1][0].data)
-    assert update["sha"] == "old-sha"
-    record = json.loads(base64.b64decode(update["content"]))
-    assert record["state"] == "starting"
-    assert record["instance_id"] == "instance-a"
-
-
-def test_metrics_registry_refuses_an_active_owner() -> None:
-    endpoint = {
-        "state": "active",
-        "instance_id": "instance-a",
-        "public_url": "https://example.trycloudflare.com",
-    }
-
-    def opener(request, *, timeout):
-        if "/git/refs/heads/live-metrics-endpoint-registry" in request.full_url:
-            return BytesIO(b'{"object":{"sha":"branch-sha"}}')
-        encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
-        return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
-
-    registry = GitHubEndpointRegistry(
-        repository="owner/repository",
-        path="docs/metrics-endpoint.json",
-        branch="live-metrics-endpoint-registry",
-        source_branch="main",
-        token="secret",
-        opener=opener,
+    restarted = MetricsHTTPServer(
+        ("127.0.0.1", port),
+        dashboard_directory=dashboard,
+        snapshot_provider=ReadyProvider(),  # type: ignore[arg-type]
     )
+    restarted.server_close()
 
-    with pytest.raises(LeaseUnavailable, match="already claimed"):
-        registry.acquire("instance-b")
-
-
-def test_metrics_registry_allows_same_installation_to_reclaim_stale_lease() -> None:
-    requests = []
-    endpoint = {
-        "state": "active",
-        "instance_id": "instance-a",
-        "public_url": "https://stale.trycloudflare.com",
-    }
-
-    def opener(request, *, timeout):
-        requests.append(request)
-        if "/git/refs/heads/live-metrics-endpoint-registry" in request.full_url:
-            return BytesIO(b'{"object":{"sha":"branch-sha"}}')
-        if request.method == "GET":
-            encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
-            return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
-        return BytesIO(b'{"content":{"sha":"new-sha"}}')
-
-    registry = GitHubEndpointRegistry(
-        repository="owner/repository",
-        path="docs/metrics-endpoint.json",
-        branch="live-metrics-endpoint-registry",
-        source_branch="main",
-        token="secret",
-        opener=opener,
-    )
-
-    assert registry.acquire("instance-a") == "new-sha"
-    update = json.loads(requests[-1].data)
-    assert update["sha"] == "old-sha"
-
-
-def test_metrics_instance_id_survives_restart(tmp_path: Path) -> None:
-    instance_id_file = tmp_path / ".metrics-instance-id"
-
-    first = load_or_create_instance_id(instance_id_file)
-    second = load_or_create_instance_id(instance_id_file)
-
-    assert first == second
-    assert len(first) == 32
-
-
-def test_metrics_http_port_disallows_socket_reuse() -> None:
-    assert MetricsHTTPServer.allow_reuse_address is False
+    assert MetricsHTTPServer.allow_reuse_address is True
     assert MetricsHTTPServer.allow_reuse_port is False
 
 
-def test_quick_tunnel_waits_for_public_gateway_snapshot() -> None:
-    calls = 0
+def test_metrics_gateway_rejects_non_loopback_host() -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        run_gateway(SimpleNamespace(host="0.0.0.0"))  # type: ignore[arg-type]
 
-    class RunningProcess:
-        def poll(self) -> None:
-            return None
 
-    def opener(request, *, timeout):
-        nonlocal calls
-        calls += 1
-        assert request.full_url.startswith("https://example.trycloudflare.com/health?t=")
-        assert timeout <= 2.5
-        if calls == 1:
-            raise OSError("DNS is not ready")
-        return BytesIO(
-            json.dumps(
-                {
-                    "status": "local_ready",
-                    "instance_id": "instance-a",
-                    "snapshot_ready": True,
-                }
-            ).encode()
-        )
+def test_metrics_server_hosts_dashboard_and_snapshot_on_one_origin(
+    tmp_path: Path,
+) -> None:
+    dashboard = tmp_path / "docs"
+    dashboard.mkdir()
+    (dashboard / "index.html").write_text("<h1>Local dashboard</h1>", encoding="utf-8")
+    (dashboard / "app.js").write_text("fetch('/metrics')", encoding="utf-8")
+    (dashboard / "styles.css").write_text("body {}", encoding="utf-8")
 
-    tunnel = QuickTunnel("cloudflared", "http://127.0.0.1:8765")
-    tunnel.process = RunningProcess()  # type: ignore[assignment]
-    tunnel.wait_until_ready(
-        "https://example.trycloudflare.com",
-        instance_id="instance-a",
-        timeout_seconds=1,
-        poll_seconds=0,
-        opener=opener,
+    class ReadyProvider:
+        @staticmethod
+        def status() -> dict:
+            return {
+                "snapshot_ready": True,
+                "snapshot_age_seconds": 0.1,
+                "snapshot_error": None,
+            }
+
+        @staticmethod
+        def get() -> dict:
+            return {"generated_at": "test", "totals": {"ingested": 1}}
+
+    server = MetricsHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard_directory=dashboard,
+        snapshot_provider=ReadyProvider(),  # type: ignore[arg-type]
     )
-
-    assert calls == 2
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with urlopen(f"{origin}/", timeout=1) as response:
+            assert response.headers.get_content_type() == "text/html"
+            assert b"Local dashboard" in response.read()
+        with urlopen(f"{origin}/metrics", timeout=1) as response:
+            assert json.load(response)["totals"]["ingested"] == 1
+        with urlopen(f"{origin}/health", timeout=1) as response:
+            assert json.load(response)["status"] == "active"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
 
 
 def test_live_rates_respond_to_recent_counter_changes() -> None:
@@ -562,8 +719,8 @@ def test_metrics_requests_use_cached_snapshot_while_refresh_is_blocked(
 
     monkeypatch.setattr("metrics.gateway.build_snapshot", build_test_snapshot)
     provider = SnapshotProvider(
-        tmp_path / "posts.sqlite3",
-        tmp_path / "labels.sqlite3",
+        [tmp_path / "posts.sqlite3"],
+        [tmp_path / "labels.sqlite3"],
         tmp_path / "tags.json",
         window_seconds=60,
         minimum_refresh_seconds=0.01,
@@ -608,6 +765,35 @@ def test_coordinator_builds_complete_process_group(tmp_path: Path) -> None:
     assert specs[1].command[specs[1].command.index("--write-buffer-size") + 1] == "100"
     assert load_supervision_settings(config).max_restarts == 5
 
+    detectors = [spec for spec in specs if spec.name.startswith("detector-")]
+    detector_databases = [
+        spec.command[spec.command.index("--post-database") + 1]
+        for spec in detectors
+    ]
+    assert len(set(detector_databases)) == config["databases"]["post_shards"]
+    expected_maximum = (
+        config["detectors"]["workers"] + config["databases"]["post_shards"] - 1
+    ) // config["databases"]["post_shards"]
+    assert (
+        max(detector_databases.count(path) for path in set(detector_databases))
+        == expected_maximum
+    )
+    metrics = next(spec for spec in specs if spec.name == "metrics")
+    reader = next(spec for spec in specs if spec.is_reader)
+    assert metrics.command.count("--post-database") == config["databases"]["post_shards"]
+    assert metrics.command.count("--label-database") == config["databases"]["label_shards"]
+    assert reader.command.count("--database") == config["databases"]["post_shards"]
+    assert all(
+        spec.command.count("--label-database") == config["databases"]["label_shards"]
+        for spec in detectors
+    )
+    publishers = [spec for spec in specs if spec.name.startswith("publisher-")]
+    publisher_databases = [
+        spec.command[spec.command.index("--database") + 1]
+        for spec in publishers
+    ]
+    assert len(set(publisher_databases)) == config["databases"]["label_shards"]
+
 
 def test_coordinator_does_not_require_reader_input_file() -> None:
     config = load_config(Path("config/pipeline.json"))
@@ -637,43 +823,97 @@ def test_coordinator_can_bound_live_smoke_test() -> None:
     assert reader.command[reader.command.index("--idle-timeout") + 1] == "30"
 
 
-def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
+def test_coordinator_runs_local_metrics_dashboard() -> None:
     pipeline = load_config(Path("config/pipeline.json"))
     specs = build_component_specs(pipeline, python_executable="python-test")
     metrics = next(spec for spec in specs if spec.name == "metrics")
 
-    assert pipeline["metrics"]["repository"] == "CSE210-Team05/Bluesky-SpoilerDetection"
-    assert pipeline["metrics"]["registry_path"] == "docs/metrics-endpoint.json"
-    assert pipeline["metrics"]["registry_branch"] == "live-metrics-endpoint-registry"
+    assert pipeline["metrics"]["dashboard_directory"] == "docs"
     assert "metrics.gateway" in metrics.command
     assert metrics.critical
     assert not metrics.restart
+    assert "--dashboard-directory" in metrics.command
     assert metrics.command[metrics.command.index("--host") + 1] == "127.0.0.1"
     assert metrics.command[metrics.command.index("--port") + 1] == "8765"
     assert metrics.command[metrics.command.index("--live-rate-window-seconds") + 1] == "10"
     assert metrics.command[metrics.command.index("--caught-up-lag-seconds") + 1] == "10"
-    assert metrics.command[metrics.command.index("--public-readiness-timeout") + 1] == "90"
-    assert metrics.readiness_statuses == ("local_ready", "active")
+    assert metrics.command[metrics.command.index("--detector-workers") + 1] == str(
+        pipeline["detectors"]["workers"]
+    )
+    assert metrics.command[metrics.command.index("--publisher-workers") + 1] == str(
+        pipeline["publishers"]["workers"]
+    )
+    assert "--repository" not in metrics.command
+    assert "--cloudflared" not in metrics.command
+    assert metrics.readiness_statuses == ("active",)
+    assert metrics.open_in_browser
 
 
-def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
+def test_coordinator_opens_ready_local_dashboard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dashboard_url = "http://127.0.0.1:8765/"
+    monkeypatch.setattr(
+        "coordinator.urlopen",
+        lambda *_args, **_kwargs: BytesIO(
+            json.dumps(
+                {"status": "active", "dashboard_url": dashboard_url}
+            ).encode()
+        ),
+    )
+    opened: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        "coordinator.webbrowser.open",
+        lambda url, *, new: opened.append((url, new)) or True,
+    )
+
+    spec = ComponentSpec(
+        name="metrics",
+        command=("metrics",),
+        readiness_url=f"{dashboard_url}health",
+        startup_timeout_seconds=1,
+        open_in_browser=True,
+    )
+    coordinator = Coordinator(
+        [spec],
+        post_queue=PostQueue(tmp_path / "posts.sqlite3"),
+        label_queue=LabelQueue(tmp_path / "labels.sqlite3"),
+        settings=SupervisionSettings(),
+    )
+
+    class RunningProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    coordinator.processes[spec.name] = RunningProcess()  # type: ignore[assignment]
+
+    assert coordinator._wait_until_ready(spec)  # pylint: disable=protected-access
+    assert opened == [(dashboard_url, 2)]
+
+
+def test_dashboard_polls_same_origin_live_metrics() -> None:
     app = Path("docs/app.js").read_text(encoding="utf-8")
     index = Path("docs/index.html").read_text(encoding="utf-8")
-    workflow = Path(".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
 
-    assert (
-        "https://raw.githubusercontent.com/CSE210-Team05/"
-        "Bluesky-SpoilerDetection/live-metrics-endpoint-registry/docs/metrics-endpoint.json"
-    ) in app
-    assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
+    assert 'const metricsSource = "/metrics"' in app
+    assert "raw.githubusercontent.com" not in app
+    assert "endpointRegistry" not in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=8"' in index
+    assert 'src="app.js?v=10"' in index
+    assert '<span class="environment">Local</span>' in index
+    assert "Worker pools" in index
+    assert 'id="detector-workers"' in index
+    assert 'id="detector-shards"' in index
+    assert 'id="publisher-workers"' in index
+    assert "average_queue_wait_seconds" in app
+    assert "average_claim_seconds" in app
     assert "Up to date" in app
     assert "Catching up" in app
     assert "AbortController" in app
     assert "refreshInFlight" in app
     assert "updateWatchdog" in app
     assert "Reader stream is not advancing" in app
-    assert '"docs/**"' not in workflow
-    assert "docs/metrics.json" not in workflow
-    assert "docs/metrics-endpoint.json" not in workflow
+    assert not Path(".github/workflows/deploy-pages.yml").exists()
+    assert not Path("docs/metrics-endpoint.json").exists()

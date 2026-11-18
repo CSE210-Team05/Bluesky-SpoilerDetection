@@ -1,4 +1,4 @@
-"""Build the read-only JSON snapshot consumed by the GitHub Pages dashboard."""
+"""Build the read-only JSON snapshot consumed by the local dashboard."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import tempfile
 import time
 from typing import Any
 
-from Bluesky_interface.post_fetcher_interface import PostQueue
-from spoiler_interface.spoiler_interface import LabelQueue
+from Bluesky_interface.post_fetcher_interface import PostQueue, ShardedPostQueue
+from spoiler_interface.spoiler_interface import LabelQueue, ShardedLabelQueue
 
 
 def load_tag_config(path: str | Path) -> dict[str, Any]:
@@ -28,12 +28,14 @@ def load_tag_config(path: str | Path) -> dict[str, Any]:
 
 
 def build_snapshot(
-    post_queue: PostQueue,
-    label_queue: LabelQueue,
+    post_queue: PostQueue | ShardedPostQueue,
+    label_queue: LabelQueue | ShardedLabelQueue,
     tag_config: str | Path,
     *,
     window_seconds: int = 60,
     caught_up_lag_seconds: float = 10.0,
+    detector_workers: int = 0,
+    publisher_workers: int = 0,
     now: float | None = None,
 ) -> dict[str, Any]:
     timestamp = time.time() if now is None else now
@@ -81,6 +83,41 @@ def build_snapshot(
                 "oldest_job_age_seconds": labels["oldest_job_age_seconds"],
             },
         },
+        "workers": {
+            "window_seconds": window_seconds,
+            "detectors": {
+                "configured": detector_workers,
+                "shards": (
+                    len(post_queue.shards)
+                    if isinstance(post_queue, ShardedPostQueue)
+                    else 1
+                ),
+                "busy": posts["busy_workers"],
+                "utilization_percent": (
+                    0.0
+                    if detector_workers == 0
+                    else 100.0 * float(posts["busy_workers"]) / detector_workers
+                ),
+                "average_queue_wait_seconds": posts["average_queue_wait_seconds"],
+                "average_claim_seconds": posts["average_claim_seconds"],
+            },
+            "publishers": {
+                "configured": publisher_workers,
+                "shards": (
+                    len(label_queue.shards)
+                    if isinstance(label_queue, ShardedLabelQueue)
+                    else 1
+                ),
+                "busy": labels["busy_workers"],
+                "utilization_percent": (
+                    0.0
+                    if publisher_workers == 0
+                    else 100.0 * float(labels["busy_workers"]) / publisher_workers
+                ),
+                "average_queue_wait_seconds": labels["average_queue_wait_seconds"],
+                "average_claim_seconds": labels["average_claim_seconds"],
+            },
+        },
         "totals": {
             "ingested": posts["ingested_total"],
             "detected": posts["acknowledged_total"],
@@ -112,19 +149,26 @@ def write_snapshot(snapshot: dict[str, Any], output: str | Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate the public dashboard metrics snapshot")
     parser.add_argument("--post-database", type=Path, default=Path("data/posts.sqlite3"))
-    parser.add_argument("--label-database", type=Path, default=Path("data/labels.sqlite3"))
+    parser.add_argument("--label-database", type=Path, action="append")
     parser.add_argument("--config", type=Path, default=Path("config/spoiler_tags.json"))
     parser.add_argument("--output", type=Path, default=Path("data/metrics.json"))
     parser.add_argument("--window-seconds", type=int, default=60)
     parser.add_argument("--caught-up-lag-seconds", type=float, default=10.0)
+    parser.add_argument("--detector-workers", type=int, default=0)
+    parser.add_argument("--publisher-workers", type=int, default=0)
     args = parser.parse_args(argv)
 
     snapshot = build_snapshot(
         PostQueue(args.post_database, migrate=False),
-        LabelQueue(args.label_database, migrate=False),
+        ShardedLabelQueue(
+            args.label_database or [Path("data/labels.sqlite3")],
+            migrate=False,
+        ),
         args.config,
         window_seconds=args.window_seconds,
         caught_up_lag_seconds=args.caught_up_lag_seconds,
+        detector_workers=args.detector_workers,
+        publisher_workers=args.publisher_workers,
     )
     write_snapshot(snapshot, args.output)
     print(json.dumps({"output": str(args.output), "generated_at": snapshot["generated_at"]}))

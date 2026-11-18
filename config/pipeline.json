@@ -1,38 +1,34 @@
 {
   "databases": {
+    "label_shards": 8,
     "labels": "data/labels.sqlite3",
+    "post_shards": 8,
     "posts": "data/posts.sqlite3"
   },
   "detectors": {
     "batch_size": 10,
-    "poll_seconds": 0.5,
+    "poll_seconds": 0.1,
     "tag_config": "config/spoiler_tags.json",
     "write_buffer_size": 100,
-    "workers": 5
+    "workers": 40
   },
   "metrics": {
-    "allowed_origin": "https://cse210-team05.github.io",
     "caught_up_lag_seconds": 10,
-    "cloudflared_executable": "cloudflared",
+    "dashboard_directory": "docs",
     "enabled": true,
     "host": "127.0.0.1",
     "live_rate_window_seconds": 10,
+    "open_browser": true,
     "port": 8765,
-    "registry_branch": "live-metrics-endpoint-registry",
-    "registry_path": "docs/metrics-endpoint.json",
-    "registry_source_branch": "main",
-    "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
     "startup_timeout_seconds": 60,
     "tag_config": "config/spoiler_tags.json",
-    "tunnel_timeout_seconds": 30,
-    "public_readiness_timeout_seconds": 90,
     "window_seconds": 300
   },
   "publishers": {
     "batch_size": 10,
     "dry_run": true,
     "poll_seconds": 0.5,
-    "workers": 1
+    "workers": 20
   },
   "reader": {
     "collection": "app.bsky.feed.post",

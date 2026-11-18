@@ -13,9 +13,20 @@ import sys
 import time
 from typing import Any, Sequence
 from urllib.request import urlopen
+import webbrowser
 
-from Bluesky_interface.post_fetcher_interface import PostQueue
-from spoiler_interface.spoiler_interface import LabelQueue
+from Bluesky_interface.post_fetcher_interface import (
+    PostQueue,
+    ShardedPostQueue,
+    configured_post_shard_paths,
+    rectify_post_shards,
+)
+from spoiler_interface.spoiler_interface import (
+    LabelQueue,
+    ShardedLabelQueue,
+    configured_label_shard_paths,
+    rectify_label_shards,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -31,6 +42,7 @@ class ComponentSpec:
     readiness_url: str | None = None
     startup_timeout_seconds: float = 0.0
     readiness_statuses: tuple[str, ...] = ("active",)
+    open_in_browser: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +67,24 @@ def load_config(path: str | Path) -> dict[str, Any]:
         workers = config[pool].get("workers")
         if not isinstance(workers, int) or workers < 0:
             raise ValueError(f"{pool}.workers must be a non-negative integer")
+    post_shards = config["databases"].get("post_shards", 1)
+    if not isinstance(post_shards, int) or post_shards < 1:
+        raise ValueError("databases.post_shards must be a positive integer")
+    detector_workers = int(config["detectors"]["workers"])
+    if detector_workers > 0 and post_shards > detector_workers:
+        raise ValueError(
+            "databases.post_shards cannot exceed detectors.workers; every shard "
+            "requires at least one detector"
+        )
+    label_shards = config["databases"].get("label_shards", 1)
+    if not isinstance(label_shards, int) or label_shards < 1:
+        raise ValueError("databases.label_shards must be a positive integer")
+    publisher_workers = int(config["publishers"]["workers"])
+    if publisher_workers > 0 and label_shards > publisher_workers:
+        raise ValueError(
+            "databases.label_shards cannot exceed publishers.workers; every shard "
+            "requires at least one publisher"
+        )
     return config
 
 
@@ -69,11 +99,34 @@ def build_component_specs(
     python_executable: str = sys.executable,
     input_override: str | Path | None = None,
     max_events_override: int | None = None,
-    force_metrics_lease: bool = False,
+    post_database_paths: Sequence[str | Path] | None = None,
+    label_database_paths: Sequence[str | Path] | None = None,
 ) -> list[ComponentSpec]:
     databases = config["databases"]
-    post_database = _path_argument(databases["posts"])
-    label_database = _path_argument(databases["labels"])
+    post_database_base = Path(_path_argument(databases["posts"]))
+    post_databases = [
+        str(path)
+        for path in (
+            post_database_paths
+            if post_database_paths is not None
+            else configured_post_shard_paths(
+                post_database_base,
+                int(databases.get("post_shards", 1)),
+            )
+        )
+    ]
+    label_database_base = Path(_path_argument(databases["labels"]))
+    label_databases = [
+        str(path)
+        for path in (
+            label_database_paths
+            if label_database_paths is not None
+            else configured_label_shard_paths(
+                label_database_base,
+                int(databases.get("label_shards", 1)),
+            )
+        )
+    ]
     specs: list[ComponentSpec] = []
 
     metrics = config["metrics"]
@@ -82,41 +135,29 @@ def build_component_specs(
             python_executable,
             "-m",
             "metrics.gateway",
-            "--post-database",
-            post_database,
-            "--label-database",
-            label_database,
             "--config",
             _path_argument(metrics.get("tag_config", "config/spoiler_tags.json")),
-            "--repository",
-            str(metrics["repository"]),
-            "--registry-path",
-            str(metrics.get("registry_path", "docs/metrics-endpoint.json")),
-            "--registry-branch",
-            str(metrics.get("registry_branch", "live-metrics-endpoint-registry")),
-            "--registry-source-branch",
-            str(metrics.get("registry_source_branch", "main")),
+            "--dashboard-directory",
+            _path_argument(metrics.get("dashboard_directory", "docs")),
             "--host",
             str(metrics.get("host", "127.0.0.1")),
             "--port",
             str(metrics.get("port", 8765)),
-            "--allowed-origin",
-            str(metrics["allowed_origin"]),
-            "--cloudflared",
-            str(metrics.get("cloudflared_executable", "cloudflared")),
-            "--tunnel-timeout",
-            str(metrics.get("tunnel_timeout_seconds", 30)),
-            "--public-readiness-timeout",
-            str(metrics.get("public_readiness_timeout_seconds", 90)),
             "--window-seconds",
             str(metrics.get("window_seconds", 300)),
+            "--detector-workers",
+            str(config["detectors"]["workers"]),
+            "--publisher-workers",
+            str(config["publishers"]["workers"]),
             "--live-rate-window-seconds",
             str(metrics.get("live_rate_window_seconds", 10)),
             "--caught-up-lag-seconds",
             str(metrics.get("caught_up_lag_seconds", 10)),
         ]
-        if force_metrics_lease:
-            command.append("--force-lease")
+        for post_database in post_databases:
+            command.extend(("--post-database", post_database))
+        for label_database in label_databases:
+            command.extend(("--label-database", label_database))
         specs.append(
             ComponentSpec(
                 name="metrics",
@@ -128,39 +169,42 @@ def build_component_specs(
                     f"{metrics.get('port', 8765)}/health"
                 ),
                 startup_timeout_seconds=float(metrics.get("startup_timeout_seconds", 60)),
-                readiness_statuses=("local_ready", "active"),
+                open_in_browser=bool(metrics.get("open_browser", True)),
             )
         )
 
     detectors = config["detectors"]
     for index in range(int(detectors["workers"])):
+        post_database = post_databases[index % len(post_databases)]
+        command = [
+            python_executable,
+            "-m",
+            "spoiler_interface.spoiler_core.spoiler_detector",
+            "--post-database",
+            post_database,
+            "--config",
+            _path_argument(detectors.get("tag_config", "config/spoiler_tags.json")),
+            "--worker-id",
+            f"detector-{index + 1}",
+            "--batch-size",
+            str(detectors.get("batch_size", 10)),
+            "--write-buffer-size",
+            str(detectors.get("write_buffer_size", 100)),
+            "--poll-seconds",
+            str(detectors.get("poll_seconds", 0.5)),
+        ]
+        for label_database in label_databases:
+            command.extend(("--label-database", label_database))
         specs.append(
             ComponentSpec(
                 name=f"detector-{index + 1}",
-                command=(
-                    python_executable,
-                    "-m",
-                    "spoiler_interface.spoiler_core.spoiler_detector",
-                    "--post-database",
-                    post_database,
-                    "--label-database",
-                    label_database,
-                    "--config",
-                    _path_argument(detectors.get("tag_config", "config/spoiler_tags.json")),
-                    "--worker-id",
-                    f"detector-{index + 1}",
-                    "--batch-size",
-                    str(detectors.get("batch_size", 10)),
-                    "--write-buffer-size",
-                    str(detectors.get("write_buffer_size", 100)),
-                    "--poll-seconds",
-                    str(detectors.get("poll_seconds", 0.5)),
-                ),
+                command=tuple(command),
             )
         )
 
     publishers = config["publishers"]
     for index in range(int(publishers["workers"])):
+        label_database = label_databases[index % len(label_databases)]
         command = [
             python_executable,
             "-m",
@@ -184,11 +228,11 @@ def build_component_specs(
             python_executable,
             "-m",
             "Bluesky_interface.post_fetcher_core.post_fetcher",
-            "--database",
-            post_database,
             "--stream-id",
             str(reader.get("stream_id", "jetstream-jsonl")),
         ]
+        for post_database in post_databases:
+            command.extend(("--database", post_database))
         configured_input = input_override if input_override is not None else reader.get("input")
         if configured_input:
             command.extend(("--input", _path_argument(configured_input)))
@@ -249,8 +293,8 @@ class Coordinator:
         self,
         specs: Sequence[ComponentSpec],
         *,
-        post_queue: PostQueue,
-        label_queue: LabelQueue,
+        post_queue: PostQueue | ShardedPostQueue,
+        label_queue: LabelQueue | ShardedLabelQueue,
         settings: SupervisionSettings,
     ):
         self.specs = {spec.name: spec for spec in specs}
@@ -297,6 +341,29 @@ class Coordinator:
                     payload = json.load(response)
                 if payload.get("status") in spec.readiness_statuses:
                     print(f"[coordinator] {spec.name} is ready", flush=True)
+                    dashboard_url = payload.get("dashboard_url")
+                    if isinstance(dashboard_url, str):
+                        print(
+                            f"[coordinator] local dashboard: {dashboard_url}",
+                            flush=True,
+                        )
+                        if spec.open_in_browser:
+                            try:
+                                opened = webbrowser.open(dashboard_url, new=2)
+                            except (OSError, webbrowser.Error) as error:
+                                print(
+                                    f"[coordinator] could not open dashboard: {error}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            else:
+                                if not opened:
+                                    print(
+                                        "[coordinator] no browser accepted the dashboard URL; "
+                                        "open it manually",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
                     return True
             except (OSError, ValueError):
                 pass
@@ -408,25 +475,49 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="live smoke test: stop after this many Jetstream messages",
     )
-    parser.add_argument(
-        "--force-metrics-lease",
-        action="store_true",
-        help="replace a stale remote metrics lease after verifying its owner has stopped",
-    )
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
+    databases = config["databases"]
+    post_database_base = Path(_path_argument(databases["posts"]))
+    print(
+        "[coordinator] rectifying post queue for "
+        f"{int(databases.get('post_shards', 1))} shard(s)",
+        flush=True,
+    )
+    post_databases = rectify_post_shards(
+        post_database_base,
+        int(databases.get("post_shards", 1)),
+    )
+    print(
+        f"[coordinator] post queue ready across {len(post_databases)} shard(s)",
+        flush=True,
+    )
+    label_database_base = Path(_path_argument(databases["labels"]))
+    print(
+        "[coordinator] rectifying label queue for "
+        f"{int(databases.get('label_shards', 1))} shard(s)",
+        flush=True,
+    )
+    label_databases = rectify_label_shards(
+        label_database_base,
+        int(databases.get("label_shards", 1)),
+    )
+    print(
+        f"[coordinator] label queue ready across {len(label_databases)} shard(s)",
+        flush=True,
+    )
     specs = build_component_specs(
         config,
         input_override=args.input,
         max_events_override=args.max_events,
-        force_metrics_lease=args.force_metrics_lease,
+        post_database_paths=post_databases,
+        label_database_paths=label_databases,
     )
-    databases = config["databases"]
     coordinator = Coordinator(
         specs,
-        post_queue=PostQueue(_path_argument(databases["posts"])),
-        label_queue=LabelQueue(_path_argument(databases["labels"])),
+        post_queue=ShardedPostQueue(post_databases, migrate=False),
+        label_queue=ShardedLabelQueue(label_databases, migrate=False),
         settings=load_supervision_settings(config),
     )
     return coordinator.run()

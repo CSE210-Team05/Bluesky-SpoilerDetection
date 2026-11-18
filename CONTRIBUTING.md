@@ -57,6 +57,19 @@ Adding tests:
 test(labeler): add spoiler label validation tests
 ```
 
+A complete commit with a focused summary and an explanatory body:
+
+```
+feat(pipeline): shard local work queues
+
+Rectify existing post and label databases to the configured shard counts
+before starting workers. Preserve queued work, metrics, stream state, and
+published-label idempotency history while replacing the prior generation.
+
+Serve the metrics dashboard locally and report worker utilization and queue
+wait times so database contention is visible.
+```
+
 ### Breaking Changes
 
 Changes that introduce incompatibilities must be indicated by adding `!` before the colon or by including a `BREAKING CHANGE:` footer.
@@ -82,8 +95,22 @@ Before submitting a pull request:
 
 1. Ensure your changes address the associated GitHub issue.
 2. Follow the Conventional Commits format.
-3. Verify that your changes work as expected.
-4. Include a description of the changes made.
-5. Reference the relevant GitHub issue in the pull request.
+3. Install development dependencies with `python -m pip install -r requirements.txt`.
+4. Run the required checks:
+
+   ```shell
+   python -m pylint coordinator.py Bluesky_interface label_publisher metrics spoiler_interface tests
+   python -m pytest -m "not e2e"
+   python -m playwright install chromium
+   python -m pytest tests/e2e --browser chromium --tracing=retain-on-failure
+   ```
+
+5. Verify that your changes work as expected.
+6. Include a description of the changes made.
+7. Reference the relevant GitHub issue in the pull request.
+
+The GitHub Actions `Checks` workflow runs lint, unit/integration, and browser
+E2E jobs for every pull request. A Pylint finding is a check failure, not a
+warning.
 
 For additional details, refer to the [official specification](https://www.conventionalcommits.org/en/v1.0.0/).

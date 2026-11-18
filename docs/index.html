@@ -6,7 +6,7 @@
     <meta name="description" content="Live performance dashboard for the Bluesky spoiler detection pipeline">
     <title>Pipeline Performance</title>
     <link rel="stylesheet" href="styles.css?v=2">
-    <script src="app.js?v=8" defer></script>
+    <script src="app.js?v=10" defer></script>
   </head>
   <body>
     <header class="app-bar">
@@ -17,7 +17,7 @@
         <span>Spoiler Pipeline</span>
       </a>
       <div class="app-bar-actions">
-        <span class="environment">Production</span>
+        <span class="environment">Local</span>
         <div class="connection" aria-live="polite">
           <span class="status-dot" id="status-dot"></span>
           <span id="freshness">Connecting...</span>
@@ -181,6 +181,47 @@
             <div class="queue-track"><i id="label-fill"></i></div>
           </div>
         </article>
+      </section>
+
+      <section class="panel worker-panel" aria-labelledby="workers-title">
+        <div class="panel-heading">
+          <div>
+            <h2 id="workers-title">Worker pools</h2>
+            <p>Active leases and recent queue/SQLite contention</p>
+          </div>
+          <span class="status-badge" id="worker-window">Rolling window</span>
+        </div>
+
+        <div class="worker-grid">
+          <article class="worker-pool" id="detector-pool">
+            <div class="worker-pool-heading">
+              <div><span class="stage-dot stage-detect"></span><strong>Detectors</strong></div>
+              <strong id="detector-workers">-- / -- busy</strong>
+            </div>
+            <div class="worker-track"><i id="detector-worker-fill"></i></div>
+            <dl class="worker-facts">
+              <div><dt>Utilization</dt><dd id="detector-utilization">--</dd></div>
+              <div><dt>Post shards</dt><dd id="detector-shards">--</dd></div>
+              <div><dt>Avg queue wait</dt><dd id="detector-queue-wait">--</dd></div>
+              <div><dt>Avg DB claim</dt><dd id="detector-db-wait">--</dd></div>
+            </dl>
+          </article>
+
+          <article class="worker-pool" id="publisher-pool">
+            <div class="worker-pool-heading">
+              <div><span class="stage-dot stage-publish"></span><strong>Publishers</strong></div>
+              <strong id="publisher-workers">-- / -- busy</strong>
+            </div>
+            <div class="worker-track"><i id="publisher-worker-fill"></i></div>
+            <dl class="worker-facts">
+              <div><dt>Utilization</dt><dd id="publisher-utilization">--</dd></div>
+              <div><dt>Label shards</dt><dd id="publisher-shards">--</dd></div>
+              <div><dt>Avg queue wait</dt><dd id="publisher-queue-wait">--</dd></div>
+              <div><dt>Avg DB claim</dt><dd id="publisher-db-wait">--</dd></div>
+            </dl>
+          </article>
+        </div>
+        <p class="worker-note">Busy means the worker holds an active queue lease. DB claim includes SQLite lock wait and claim-query time.</p>
       </section>
 
       <section class="content-grid lower-grid">

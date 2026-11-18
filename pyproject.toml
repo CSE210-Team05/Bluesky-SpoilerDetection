@@ -28,29 +28,37 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "e2e: browser tests that exercise the complete local pipeline",
+]
 
 [tool.pylint.basic]
-# Main configuration setting everything to camelCase
-argument-naming-style = "camelCase"
-attr-naming-style = "camelCase"
-const-naming-style = "camelCase"
-function-naming-style = "camelCase"
-method-naming-style = "camelCase"
-variable-naming-style = "camelCase"
+# Follow normal Python naming while preserving the detector's required public API.
+argument-naming-style = "snake_case"
+attr-naming-style = "snake_case"
+const-naming-style = "UPPER_CASE"
+function-naming-style = "snake_case"
+method-naming-style = "snake_case"
+variable-naming-style = "snake_case"
 # ``status_code`` mirrors the public requests.Response attribute in protocol
 # doubles and must retain that external spelling.
-good-names = ["tmp_path", "status_code"]
+good-names = ["tmp_path", "status_code", "isSpoiler", "do_GET", "do_HEAD"]
 
 # Setting Class names to PascalCase
 class-naming-style = "PascalCase"
-class-attribute-naming-style = "camelCase"
+# Class-level constants use UPPER_CASE; ordinary class attributes use snake_case.
+class-attribute-rgx = "^(_?[A-Z][A-Z0-9_]*|_?[a-z][a-z0-9_]*)$"
 
 # Python modules and packages use Python's conventional snake_case naming.
 module-naming-style = "snake_case"
+module-rgx = "^(Bluesky_interface|[a-z_][a-z0-9_]*)$"
 
 [tool.pylint.messages_control]
-# This repository adopted Pylint specifically as its identifier-name checker.
-# Broader correctness and complexity policy can be introduced separately
-# without folding hundreds of unrelated legacy findings into this migration.
+# Fatal errors, correctness errors, and naming are enforced. CI treats every
+# enabled finding as an error; style rules can be enabled incrementally.
 disable = ["all"]
-enable = ["invalid-name"]
+enable = ["E", "F", "invalid-name"]
+
+[tool.pylint.typecheck]
+# This member exists only on Windows, so it is absent when Pylint runs on Linux/macOS.
+generated-members = ["signal.CTRL_BREAK_EVENT"]

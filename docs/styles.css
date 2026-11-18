@@ -430,6 +430,23 @@ h1 {
 .queue-row.warning .queue-track i { background: var(--orange); }
 .queue-row.danger .queue-track i { background: var(--red); }
 
+.worker-panel { margin-bottom: 18px; }
+.worker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.worker-pool { padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
+.worker-pool-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.worker-pool-heading > div { display: flex; align-items: center; gap: 8px; }
+.worker-pool-heading strong { color: var(--ink); font-size: 12px; }
+.worker-pool-heading > strong { font-size: 14px; }
+.worker-track { height: 6px; margin: 15px 0; overflow: hidden; border-radius: 6px; background: #eeecf1; }
+.worker-track i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--purple); transition: width 300ms ease; }
+#publisher-worker-fill { background: var(--green); }
+.worker-facts { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; }
+.worker-facts div { padding: 2px 14px; border-left: 1px solid var(--line); }
+.worker-facts div:first-child { padding-left: 0; border-left: 0; }
+.worker-facts dt { color: var(--muted-light); font-size: 10px; }
+.worker-facts dd { margin: 6px 0 0; color: var(--ink-strong); font-size: 13px; font-weight: 620; }
+.worker-note { margin: 14px 0 0; color: var(--muted-light); font-size: 10px; }
+
 .totals-list {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -485,6 +502,7 @@ footer {
   .health-ring { width: 86px; height: 86px; flex-basis: 86px; }
   .health-facts div { padding: 19px; }
   .metric-grid { grid-template-columns: 1fr; }
+  .worker-grid { grid-template-columns: 1fr; }
   .metric-card { min-height: 172px; }
   .totals-list { grid-template-columns: repeat(2, 1fr); }
   .totals-list div:nth-child(4n) { border-right: 1px solid var(--line); }
@@ -507,6 +525,9 @@ footer {
   .health-facts div:last-child { border-bottom: 0; }
   .panel { padding: 18px; }
   .panel-heading { display: block; }
+  .worker-facts { grid-template-columns: 1fr; }
+  .worker-facts div { padding: 10px 0; border-left: 0; border-top: 1px solid var(--line); }
+  .worker-facts div:first-child { border-top: 0; }
   .status-badge { display: inline-block; margin-top: 10px; }
   footer { display: block; line-height: 1.8; }
   footer span { display: block; }
