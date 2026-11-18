@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -34,6 +35,7 @@ jobs:
           label_publisher
           metrics
           spoiler_interface
+          benchmarks
           tests
 
   tests:
@@ -56,8 +58,95 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Run unit and integration tests
-        run: python -m pytest -m "not e2e"
+      - name: Run unit and integration tests with coverage
+        run: >-
+          python -m pytest
+          -m "not e2e and not performance"
+          --cov
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-report=html
+
+      - name: Add coverage to job summary
+        if: ${{ !cancelled() && hashFiles('.coverage') != '' }}
+        run: python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-python-${{ matrix.python-version }}
+          path: |
+            coverage-html/
+            coverage.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  documentation:
+    name: Render documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install documentation dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Render documentation
+        run: python -m mkdocs build --strict
+
+      - name: Upload rendered documentation
+        uses: actions/upload-artifact@v5
+        with:
+          name: rendered-documentation
+          path: site/
+          if-no-files-found: error
+          retention-days: 14
+
+  performance:
+    name: Pipeline throughput
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Enforce throughput requirement and collect profile
+        env:
+          PERFORMANCE_RESULTS_DIR: performance-results
+        run: python -m pytest tests/performance -m performance -rA
+
+      - name: Add throughput result to job summary
+        if: ${{ !cancelled() && hashFiles('performance-results/pipeline.json') != '' }}
+        run: |
+          echo '### Pipeline throughput' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat performance-results/pipeline.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload throughput results and profile
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: pipeline-performance
+          path: performance-results/
+          if-no-files-found: error
+          retention-days: 14
 
   e2e:
     name: Chromium E2E
@@ -92,3 +181,23 @@ jobs:
           path: test-results/
           if-no-files-found: ignore
           retention-days: 7
+
+  quality-gate:
+    name: Required quality gate
+    if: ${{ always() }}
+    needs: [lint, tests, documentation, performance, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every quality job to pass
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          DOCUMENTATION_RESULT: ${{ needs.documentation.result }}
+          PERFORMANCE_RESULT: ${{ needs.performance.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          test "$LINT_RESULT" = success
+          test "$TESTS_RESULT" = success
+          test "$DOCUMENTATION_RESULT" = success
+          test "$PERFORMANCE_RESULT" = success
+          test "$E2E_RESULT" = success

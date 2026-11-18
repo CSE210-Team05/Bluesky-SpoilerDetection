@@ -1,5 +1,9 @@
 # Bluesky Spoiler Detection
 
+[Project documentation](documentation/index.md) covers the pipeline contract,
+operations, and enforced quality gates. CI also publishes a rendered HTML copy
+as the `rendered-documentation` workflow artifact.
+
 First-pass implementation of the queue-based pipeline described in
 [`architecture.md`](architecture.md):
 
@@ -152,22 +156,29 @@ coordinator can be restarted without waiting for TCP connections to expire.
 
 ## Test
 
-Install the development dependencies, then run the same three checks used by
-GitHub Actions:
+Install the development dependencies, then run the same checks used by GitHub
+Actions:
 
 ```shell
-python -m pylint coordinator.py Bluesky_interface label_publisher metrics spoiler_interface tests
-python -m pytest -m "not e2e"
+python -m pylint coordinator.py Bluesky_interface label_publisher metrics spoiler_interface benchmarks tests
+python -m pytest -m "not e2e and not performance" --cov --cov-branch --cov-report=term-missing
+python -m pytest tests/performance -m performance -rA
+python -m mkdocs build --strict
 python -m playwright install chromium
 python -m pytest tests/e2e --browser chromium --tracing=retain-on-failure
 ```
 
-The E2E test launches the real coordinator with a temporary replay stream and
+The coverage gate fails below the repository threshold and publishes HTML/XML
+reports. The performance test drives durable events through both SQLite queues,
+enforces `config/performance.json`, and publishes JSON plus `cProfile` output.
+MkDocs renders the repository documentation in strict mode. The E2E test
+launches the real coordinator with a temporary replay stream and
 uses Chromium to verify that an event reaches the rendered dashboard after
 ingestion, detection, and dry-run publication. The `Checks` workflow runs lint,
-unit/integration tests on Python 3.11 and 3.13, and Chromium E2E as separate
-jobs. Any Pylint finding enabled in `pyproject.toml` returns a nonzero status and
-fails the lint job.
+coverage on Python 3.11 and 3.13, documentation, the throughput regression, and
+Chromium E2E as separate jobs. Any Pylint finding enabled in `pyproject.toml`
+returns a nonzero status and fails the lint job. The stable `Required quality
+gate` status aggregates every job for branch protection.
 
 ## Current boundaries
 

@@ -9,3 +9,8 @@ data/
 *.sqlite3-shm
 *.sqlite3-wal
 *.env
+/.coverage
+/coverage-html/
+/coverage.xml
+/performance-results/
+/site/
