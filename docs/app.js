@@ -2,7 +2,7 @@ const byId = (id) => document.getElementById(id);
 const metricsSource = "/metrics";
 const svgNamespace = "http://www.w3.org/2000/svg";
 const historyLimit = 60;
-const history = { ingestion: [], label: [], publish: [] };
+const history = { ingestion: [], detection: [], label: [], publish: [] };
 const requestTimeoutMilliseconds = 2_500;
 const staleWarningSeconds = 4;
 const staleErrorSeconds = 15;
@@ -28,8 +28,8 @@ function formatLag(seconds) {
   return `${(seconds / 60).toFixed(1)}m`;
 }
 
-function formatDuration(seconds) {
-  if (seconds == null) return "No recent claims";
+function formatDuration(seconds, unavailable = "No recent claims") {
+  if (seconds == null) return unavailable;
   const value = Number(seconds);
   if (value < 0.001) return "<1ms";
   if (value < 1) return `${(value * 1_000).toFixed(value < 0.01 ? 2 : 1)}ms`;
@@ -68,15 +68,24 @@ function renderSparkline(elementId, values, color) {
 
 function renderCharts(rates) {
   addSample(history.ingestion, rates.ingestion_per_second);
+  addSample(history.detection, rates.detection_per_second);
   addSample(history.label, rates.label_per_second);
   addSample(history.publish, rates.publish_per_second);
 
   renderSparkline("ingestion-sparkline", history.ingestion, "#1688f8");
-  renderSparkline("label-sparkline", history.label, "#6c5fc7");
+  renderSparkline("detection-sparkline", history.detection, "#6c5fc7");
+  renderSparkline("label-sparkline", history.label, "#d97735");
   renderSparkline("publish-sparkline", history.publish, "#2c9a63");
 
-  const maximum = Math.max(1, ...history.ingestion, ...history.label, ...history.publish);
+  const maximum = Math.max(
+    1,
+    ...history.ingestion,
+    ...history.detection,
+    ...history.label,
+    ...history.publish,
+  );
   byId("chart-ingestion").setAttribute("d", linePath(history.ingestion, 720, 230, maximum));
+  byId("chart-detection").setAttribute("d", linePath(history.detection, 720, 230, maximum));
   byId("chart-label").setAttribute("d", linePath(history.label, 720, 230, maximum));
   byId("chart-publish").setAttribute("d", linePath(history.publish, 720, 230, maximum));
   byId("chart-max").textContent = maximum < 10 ? maximum.toFixed(1) : Math.ceil(maximum).toString();
@@ -124,7 +133,10 @@ function renderWorkerPool(prefix, pool) {
   byId(`${prefix}-utilization`).textContent = `${utilization.toFixed(0)}%`;
   const shards = byId(`${prefix}-shards`);
   if (shards) shards.textContent = formatInteger(pool.shards || 0);
-  byId(`${prefix}-queue-wait`).textContent = formatDuration(pool.average_queue_wait_seconds);
+  byId(`${prefix}-traversal`).textContent = formatDuration(
+    pool.average_traversal_seconds,
+    "No recent completions",
+  );
   byId(`${prefix}-db-wait`).textContent = formatDuration(pool.average_claim_seconds);
   byId(`${prefix}-worker-fill`).style.width = `${Math.min(100, utilization)}%`;
 }
@@ -241,6 +253,7 @@ function render(data) {
   lastConnectionError = null;
   const rates = data.rates || {};
   byId("ingestion-rate").textContent = formatRate(rates.ingestion_per_second);
+  byId("detection-rate").textContent = formatRate(rates.detection_per_second);
   byId("label-rate").textContent = formatRate(rates.label_per_second);
   byId("publish-rate").textContent = formatRate(rates.publish_per_second);
   byId("window").textContent = `${data.window_seconds}s rolling window`;

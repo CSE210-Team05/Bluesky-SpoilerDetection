@@ -6,7 +6,7 @@
     <meta name="description" content="Live performance dashboard for the Bluesky spoiler detection pipeline">
     <title>Pipeline Performance</title>
     <link rel="stylesheet" href="styles.css?v=2">
-    <script src="app.js?v=10" defer></script>
+    <script src="app.js?v=11" defer></script>
   </head>
   <body>
     <header class="app-bar">
@@ -96,13 +96,26 @@
           <div class="metric-heading">
             <div>
               <span class="stage-dot stage-detect"></span>
-              <h2>Detection</h2>
+              <h2>Detector throughput</h2>
             </div>
             <span>Workers</span>
           </div>
+          <div class="metric-value"><strong id="detection-rate">--</strong><span>/ sec</span></div>
+          <p>Positive and negative classifications completed</p>
+          <svg class="sparkline" id="detection-sparkline" viewBox="0 0 240 54" preserveAspectRatio="none" aria-label="Recent classification rate"></svg>
+        </article>
+
+        <article class="metric-card">
+          <div class="metric-heading">
+            <div>
+              <span class="stage-dot stage-label"></span>
+              <h2>Positive labels</h2>
+            </div>
+            <span>Matches</span>
+          </div>
           <div class="metric-value"><strong id="label-rate">--</strong><span>/ sec</span></div>
-          <p>Spoiler labels produced</p>
-          <svg class="sparkline" id="label-sparkline" viewBox="0 0 240 54" preserveAspectRatio="none" aria-label="Recent detection rate"></svg>
+          <p>Posts matching a configured spoiler tag</p>
+          <svg class="sparkline" id="label-sparkline" viewBox="0 0 240 54" preserveAspectRatio="none" aria-label="Recent positive label rate"></svg>
         </article>
 
         <article class="metric-card">
@@ -128,7 +141,8 @@
             </div>
             <div class="chart-legend" aria-label="Chart legend">
               <span><i class="legend-ingest"></i>Ingested</span>
-              <span><i class="legend-detect"></i>Labeled</span>
+              <span><i class="legend-detect"></i>Classified</span>
+              <span><i class="legend-label"></i>Positive</span>
               <span><i class="legend-publish"></i>Published</span>
             </div>
           </div>
@@ -142,7 +156,8 @@
                 <line x1="0" y1="229" x2="720" y2="229"></line>
               </g>
               <path id="chart-ingestion" class="chart-line chart-ingest"></path>
-              <path id="chart-label" class="chart-line chart-detect"></path>
+              <path id="chart-detection" class="chart-line chart-detect"></path>
+              <path id="chart-label" class="chart-line chart-label"></path>
               <path id="chart-publish" class="chart-line chart-publish"></path>
             </svg>
           </div>
@@ -202,7 +217,7 @@
             <dl class="worker-facts">
               <div><dt>Utilization</dt><dd id="detector-utilization">--</dd></div>
               <div><dt>Post shards</dt><dd id="detector-shards">--</dd></div>
-              <div><dt>Avg queue wait</dt><dd id="detector-queue-wait">--</dd></div>
+              <div><dt>Avg ingest → classify</dt><dd id="detector-traversal">--</dd></div>
               <div><dt>Avg DB claim</dt><dd id="detector-db-wait">--</dd></div>
             </dl>
           </article>
@@ -216,12 +231,12 @@
             <dl class="worker-facts">
               <div><dt>Utilization</dt><dd id="publisher-utilization">--</dd></div>
               <div><dt>Label shards</dt><dd id="publisher-shards">--</dd></div>
-              <div><dt>Avg queue wait</dt><dd id="publisher-queue-wait">--</dd></div>
+              <div><dt>Avg ingest → publish</dt><dd id="publisher-traversal">--</dd></div>
               <div><dt>Avg DB claim</dt><dd id="publisher-db-wait">--</dd></div>
             </dl>
           </article>
         </div>
-        <p class="worker-note">Busy means the worker holds an active queue lease. DB claim includes SQLite lock wait and claim-query time.</p>
+        <p class="worker-note">Traversal begins when the reader accepts a post and ends at classification or publication acknowledgement. DB claim includes SQLite lock wait and claim-query time.</p>
       </section>
 
       <section class="content-grid lower-grid">

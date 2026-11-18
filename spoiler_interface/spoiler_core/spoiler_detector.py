@@ -50,10 +50,6 @@ class KeywordSpoilerDetector:
         )
 
     def detect(self, text: str) -> DetectionResult:
-        # First-pass throughput mode: intentionally bypass classification so
-        # every post exercises the complete label and publisher pipeline.
-        return DetectionResult(True, ())
-
         matches = tuple(tag for tag, pattern in self._patterns if pattern.search(text))
         return DetectionResult(bool(matches), matches)
 

@@ -181,6 +181,10 @@ def test_coordinator_renders_processed_event_in_local_dashboard(
         expect(page.get_by_role("heading", name="Pipeline performance")).to_be_visible()
         expect(page.locator(".environment")).to_have_text("Local")
         expect(page.locator("#events-received")).to_have_text("1", timeout=15_000)
+        expect(page.locator("#detection-rate")).not_to_have_text("--")
+        expect(page.locator("#label-rate")).not_to_have_text("--")
+        expect(page.get_by_role("heading", name="Detector throughput")).to_be_visible()
+        expect(page.get_by_role("heading", name="Positive labels")).to_be_visible()
         expect(
             page.locator("#totals div").filter(has_text="Ingested").locator("dd")
         ).to_have_text("1", timeout=15_000)
@@ -195,8 +199,11 @@ def test_coordinator_renders_processed_event_in_local_dashboard(
         expect(page.locator("#detector-shards")).to_have_text("2")
         expect(page.locator("#publisher-workers")).to_contain_text("/ 2 busy")
         expect(page.locator("#publisher-shards")).to_have_text("2")
-        expect(page.locator("#detector-queue-wait")).not_to_have_text(
-            "No recent claims"
+        expect(page.locator("#detector-traversal")).not_to_have_text(
+            "No recent completions"
+        )
+        expect(page.locator("#publisher-traversal")).not_to_have_text(
+            "No recent completions"
         )
         expect(page.locator("#detector-db-wait")).not_to_have_text(
             "No recent claims"

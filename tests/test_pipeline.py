@@ -112,6 +112,28 @@ def test_post_queue_migrates_existing_stream_health_for_source_lag(tmp_path: Pat
     assert "source_event_at" in columns
 
 
+def test_label_queue_migrates_pipeline_start_timestamp(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-labels.sqlite3"
+    queue = LabelQueue(database)
+    job = LabelJob.create(
+        post_uri="at://did:plc:test/app.bsky.feed.post/legacy",
+        post_cid="legacy-cid",
+        label_value="spoiler",
+        detector_version="legacy-v1",
+        detected_at=50.0,
+        pipeline_started_at=40.0,
+    )
+    assert queue.enqueue(job, now=51.0)
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE label_jobs DROP COLUMN pipeline_started_at")
+
+    migrated = LabelQueue(database)
+    claimed = migrated.claim("publisher-a", now=52.0)
+
+    assert len(claimed) == 1
+    assert claimed[0].job.pipeline_started_at == 50.0
+
+
 def test_metrics_adapters_can_open_without_schema_writes(tmp_path: Path) -> None:
     post_database = tmp_path / "posts.sqlite3"
     label_database = tmp_path / "labels.sqlite3"
@@ -121,6 +143,36 @@ def test_metrics_adapters_can_open_without_schema_writes(tmp_path: Path) -> None
 
     assert not post_database.exists()
     assert not label_database.exists()
+
+
+def test_rectification_upgrades_active_shards_before_read_only_metrics(
+    tmp_path: Path,
+) -> None:
+    post_database = tmp_path / "posts.sqlite3"
+    label_database = tmp_path / "labels.sqlite3"
+    post_paths = rectify_post_shards(post_database, 2)
+    label_paths = rectify_label_shards(label_database, 2)
+
+    for database in (*post_paths, *label_paths):
+        table = (
+            "post_metric_buckets"
+            if database in post_paths
+            else "label_metric_buckets"
+        )
+        with sqlite3.connect(database) as connection:
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN completed")
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN traversal_seconds")
+
+    assert rectify_post_shards(post_database, 2) == post_paths
+    assert rectify_label_shards(label_database, 2) == label_paths
+
+    post_metrics = ShardedPostQueue(post_paths, migrate=False).metrics()
+    label_metrics = ShardedLabelQueue(label_paths, migrate=False).metrics()
+
+    assert post_metrics["recent_completed"] == 0
+    assert post_metrics["average_traversal_seconds"] is None
+    assert label_metrics["recent_completed"] == 0
+    assert label_metrics["average_traversal_seconds"] is None
 
 
 def test_post_database_rectification_migrates_backlog_and_replaces_generation(
@@ -349,16 +401,14 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
         result = detect_once(worker_interface, detector, batch_size=10)
         persisted = worker_interface.flush()
 
-    assert result == {"claimed": 2, "positive": 2, "negative": 0, "failed": 0}
-    assert persisted == {"positive": 2, "negative": 0, "failed": 0}
+    assert result == {"claimed": 2, "positive": 1, "negative": 1, "failed": 0}
+    assert persisted == {"positive": 1, "negative": 1, "failed": 0}
     assert posts.metrics()["available"] == 0
 
     claimed = labels.claim("publisher-a", limit=10)
-    assert len(claimed) == 2
-    assert {delivery.job.post_cid for delivery in claimed} == {
-        positive.post_cid,
-        negative.post_cid,
-    }
+    assert len(claimed) == 1
+    assert claimed[0].job.post_cid == positive.post_cid
+    assert claimed[0].job.pipeline_started_at == positive.received_at
     assert {delivery.job.label_value for delivery in claimed} == {"spoiler"}
 
     duplicate = LabelJob.create(
@@ -368,6 +418,17 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
         detector_version="different-version",
     )
     assert not labels.enqueue(duplicate)
+
+
+def test_keyword_detector_matches_labels_without_substring_false_positives() -> None:
+    detector = KeywordSpoilerDetector(["spoiler", "finale"])
+
+    positive = detector.detect("The FINALE spoiler is here")
+
+    assert positive.is_spoiler is True
+    assert positive.matched_tags == ("spoiler", "finale")
+    assert detector.detect("This spoilerish word is harmless").is_spoiler is False
+    assert detector.detect("No configured label appears here").is_spoiler is False
 
 
 def test_detector_function_returns_only_id_and_decision(tmp_path: Path) -> None:
@@ -519,7 +580,7 @@ def test_metrics_snapshot_combines_both_interfaces(tmp_path: Path) -> None:
     assert snapshot["workers"]["window_seconds"] == 60
 
 
-def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
+def test_queue_metrics_report_busy_workers_and_completion_traversal(
     tmp_path: Path,
 ) -> None:
     posts = PostQueue(tmp_path / "worker-posts.sqlite3")
@@ -531,7 +592,9 @@ def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
         now=100.0,
     )
     assert len(posts.claim("detector-a", now=105.0)) == 1
-    post_metrics = posts.metrics(window_seconds=60, now=105.0)
+    assert posts.metrics(window_seconds=60, now=105.0)["busy_workers"] == 1
+    assert posts.acknowledge(post.job_id, "detector-a", outcome="positive", now=108.0)
+    post_metrics = posts.metrics(window_seconds=60, now=108.0)
 
     labels = LabelQueue(tmp_path / "worker-labels.sqlite3")
     label = LabelJob.create(
@@ -539,16 +602,22 @@ def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
         post_cid=post.post_cid,
         label_value="spoiler",
         detector_version="test-v1",
+        detected_at=199.0,
+        pipeline_started_at=190.0,
     )
     assert labels.enqueue(label, now=200.0)
     assert len(labels.claim("publisher-a", now=203.0)) == 1
-    label_metrics = labels.metrics(window_seconds=60, now=203.0)
+    assert labels.metrics(window_seconds=60, now=203.0)["busy_workers"] == 1
+    assert labels.acknowledge(label.job_id, "publisher-a", now=209.0)
+    label_metrics = labels.metrics(window_seconds=60, now=209.0)
 
-    assert post_metrics["busy_workers"] == 1
+    assert post_metrics["busy_workers"] == 0
     assert post_metrics["average_queue_wait_seconds"] == 5.0
+    assert post_metrics["average_traversal_seconds"] == 8.0
     assert float(post_metrics["average_claim_seconds"]) >= 0
-    assert label_metrics["busy_workers"] == 1
+    assert label_metrics["busy_workers"] == 0
     assert label_metrics["average_queue_wait_seconds"] == 3.0
+    assert label_metrics["average_traversal_seconds"] == 19.0
     assert float(label_metrics["average_claim_seconds"]) >= 0
 
 
@@ -901,14 +970,22 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert "raw.githubusercontent.com" not in app
     assert "endpointRegistry" not in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=10"' in index
+    assert 'src="app.js?v=11"' in index
     assert '<span class="environment">Local</span>' in index
     assert "Worker pools" in index
     assert 'id="detector-workers"' in index
     assert 'id="detector-shards"' in index
     assert 'id="publisher-workers"' in index
-    assert "average_queue_wait_seconds" in app
+    assert "average_traversal_seconds" in app
+    assert "average_queue_wait_seconds" not in app
     assert "average_claim_seconds" in app
+    assert 'id="detector-traversal"' in index
+    assert 'id="publisher-traversal"' in index
+    assert 'id="detection-rate"' in index
+    assert "rates.detection_per_second" in app
+    assert "Detector throughput" in index
+    assert "Positive and negative classifications completed" in index
+    assert "Posts matching a configured spoiler tag" in index
     assert "Up to date" in app
     assert "Catching up" in app
     assert "AbortController" in app
@@ -935,3 +1012,15 @@ def test_rendered_documentation_has_a_public_deployment() -> None:
     assert "rendered documentation from `main`" in readme
     assert site_url in readme
     assert f"site_url: {site_url}" in mkdocs
+
+
+def test_agent_guide_is_discoverable_and_tracks_core_contracts() -> None:
+    guide = Path("AGENTS.md").read_text(encoding="utf-8")
+    contributing = Path("CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    assert "[`AGENTS.md`](AGENTS.md)" in contributing
+    assert "Detector throughput" in guide
+    assert "Publisher traversal" in guide
+    assert "config/performance.json" in guide
+    assert 'python -m pytest -m "not e2e and not performance"' in guide
+    assert "Required quality gate" in guide

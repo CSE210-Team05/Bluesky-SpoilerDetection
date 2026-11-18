@@ -179,7 +179,9 @@ class PostQueue:
                     claimed INTEGER NOT NULL DEFAULT 0,
                     claim_wait_seconds REAL NOT NULL DEFAULT 0,
                     claim_transactions INTEGER NOT NULL DEFAULT 0,
-                    claim_db_seconds REAL NOT NULL DEFAULT 0
+                    claim_db_seconds REAL NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    traversal_seconds REAL NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -198,6 +200,8 @@ class PostQueue:
                 ("claim_wait_seconds", "REAL NOT NULL DEFAULT 0"),
                 ("claim_transactions", "INTEGER NOT NULL DEFAULT 0"),
                 ("claim_db_seconds", "REAL NOT NULL DEFAULT 0"),
+                ("completed", "INTEGER NOT NULL DEFAULT 0"),
+                ("traversal_seconds", "REAL NOT NULL DEFAULT 0"),
             ):
                 if column not in metric_columns:
                     connection.execute(
@@ -459,12 +463,16 @@ class PostQueue:
         with self._connect() as connection:
             self._begin(connection)
             try:
-                result = connection.execute(
-                    "DELETE FROM post_jobs WHERE job_id = ? AND status = 'leased' AND leased_by = ?",
+                row = connection.execute(
+                    """
+                    SELECT received_at FROM post_jobs
+                    WHERE job_id = ? AND status = 'leased' AND leased_by = ?
+                    """,
                     (job_id, worker_id),
-                )
-                acknowledged = result.rowcount == 1
+                ).fetchone()
+                acknowledged = row is not None
                 if acknowledged:
+                    connection.execute("DELETE FROM post_jobs WHERE job_id = ?", (job_id,))
                     connection.execute(
                         "UPDATE post_queue_totals SET acknowledged = acknowledged + 1 WHERE singleton = 1"
                     )
@@ -473,6 +481,19 @@ class PostQueue:
                         f"detected_{outcome}",
                         1,
                         timestamp,
+                    )
+                    bucket = int(timestamp // 60) * 60
+                    connection.execute(
+                        """
+                        INSERT INTO post_metric_buckets(
+                            bucket, completed, traversal_seconds
+                        ) VALUES (?, 1, ?)
+                        ON CONFLICT(bucket) DO UPDATE SET
+                            completed = completed + 1,
+                            traversal_seconds = traversal_seconds
+                                + excluded.traversal_seconds
+                        """,
+                        (bucket, max(0.0, timestamp - float(row["received_at"]))),
                     )
                 connection.commit()
             except BaseException:
@@ -573,7 +594,9 @@ class PostQueue:
                        COALESCE(SUM(claimed), 0) AS claimed,
                        COALESCE(SUM(claim_wait_seconds), 0) AS claim_wait_seconds,
                        COALESCE(SUM(claim_transactions), 0) AS claim_transactions,
-                       COALESCE(SUM(claim_db_seconds), 0) AS claim_db_seconds
+                       COALESCE(SUM(claim_db_seconds), 0) AS claim_db_seconds,
+                       COALESCE(SUM(completed), 0) AS completed,
+                       COALESCE(SUM(traversal_seconds), 0) AS traversal_seconds
                 FROM post_metric_buckets WHERE bucket >= ?
                 """,
                 (first_bucket,),
@@ -588,6 +611,7 @@ class PostQueue:
         leased = min(depth, int(leased_row["leased"] or 0))
         claimed = int(rates["claimed"] or 0)
         claim_transactions = int(rates["claim_transactions"] or 0)
+        completed = int(rates["completed"] or 0)
         oldest = oldest_row["oldest"]
         result: dict[str, float | int | bool | str | None] = {
             "available": depth - leased,
@@ -609,10 +633,17 @@ class PostQueue:
                 if claim_transactions == 0
                 else float(rates["claim_db_seconds"]) / claim_transactions
             ),
+            "average_traversal_seconds": (
+                None
+                if completed == 0
+                else float(rates["traversal_seconds"]) / completed
+            ),
             "recent_claimed": claimed,
             "recent_claim_wait_seconds": float(rates["claim_wait_seconds"]),
             "recent_claim_transactions": claim_transactions,
             "recent_claim_db_seconds": float(rates["claim_db_seconds"]),
+            "recent_completed": completed,
+            "recent_traversal_seconds": float(rates["traversal_seconds"]),
             "ingested_total": int(totals["ingested"]),
             "acknowledged_total": int(totals["acknowledged"]),
             "retried_total": int(totals["retried"]),
@@ -741,6 +772,8 @@ def rectify_post_shards(database: str | Path, shard_count: int) -> list[Path]:
         and int(manifest.get("shard_count", 0)) == shard_count
         and not base.exists()
     ):
+        for path in active_paths:
+            PostQueue(path)
         active_parent = active_paths[0].parent
         for candidate in root.iterdir():
             if candidate.is_dir() and candidate != active_parent:
@@ -776,6 +809,8 @@ def rectify_post_shards(database: str | Path, shard_count: int) -> list[Path]:
         "claim_wait_seconds",
         "claim_transactions",
         "claim_db_seconds",
+        "completed",
+        "traversal_seconds",
     )
     try:
         for path in building_paths:
@@ -915,8 +950,9 @@ def rectify_post_shards(database: str | Path, shard_count: int) -> list[Path]:
                 INSERT INTO post_metric_buckets(
                     bucket, ingested, detected_positive, detected_negative,
                     retried, dead_lettered, claimed, claim_wait_seconds,
-                    claim_transactions, claim_db_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    claim_transactions, claim_db_seconds, completed,
+                    traversal_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (bucket, *(values[name] for name in metric_names)),
             )
@@ -1051,6 +1087,7 @@ class ShardedPostQueue:
             "detection_rate_per_second", "retry_rate_per_second",
             "recent_claimed", "recent_claim_wait_seconds",
             "recent_claim_transactions", "recent_claim_db_seconds",
+            "recent_completed", "recent_traversal_seconds",
             "ingested_total", "acknowledged_total", "retried_total",
             "dead_lettered_total", "stream_reconnect_total",
             "stream_received_total", "stream_invalid_total",
@@ -1061,7 +1098,7 @@ class ShardedPostQueue:
         }
         for name in (
             "available", "leased", "busy_workers", "dead", "recent_claimed",
-            "recent_claim_transactions", "ingested_total", "acknowledged_total",
+            "recent_claim_transactions", "recent_completed", "ingested_total", "acknowledged_total",
             "retried_total", "dead_lettered_total", "stream_reconnect_total",
             "stream_received_total", "stream_invalid_total",
         ):
@@ -1077,6 +1114,12 @@ class ShardedPostQueue:
             None
             if transactions == 0
             else float(result["recent_claim_db_seconds"] or 0) / transactions
+        )
+        completed = int(result["recent_completed"] or 0)
+        result["average_traversal_seconds"] = (
+            None
+            if completed == 0
+            else float(result["recent_traversal_seconds"] or 0) / completed
         )
         ages = [
             float(snapshot["oldest_job_age_seconds"])
