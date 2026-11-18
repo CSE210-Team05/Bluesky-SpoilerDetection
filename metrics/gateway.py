@@ -516,6 +516,61 @@ class QuickTunnel:
     def poll(self) -> int | None:
         return None if self.process is None else self.process.poll()
 
+    def wait_until_ready(
+        self,
+        public_url: str,
+        *,
+        instance_id: str,
+        timeout_seconds: float = 90.0,
+        poll_seconds: float = 0.5,
+        opener: Callable[..., Any] = urlopen,
+    ) -> None:
+        """Wait until the public tunnel reaches this gateway and a snapshot exists."""
+        health_url = f"{public_url.rstrip('/')}/health"
+        deadline = time.monotonic() + timeout_seconds
+        last_error = "the public endpoint did not respond"
+
+        while time.monotonic() < deadline:
+            return_code = self.poll()
+            if return_code is not None:
+                raise RuntimeError(
+                    "cloudflared exited before its public URL became reachable "
+                    f"(status {return_code})"
+                )
+
+            remaining = max(0.01, deadline - time.monotonic())
+            request = Request(
+                f"{health_url}?t={time.time_ns()}",
+                headers={
+                    "Accept": "application/json",
+                    "Cache-Control": "no-cache",
+                    "User-Agent": "bluesky-spoiler-metrics-readiness",
+                },
+            )
+            try:
+                with opener(request, timeout=min(2.5, remaining)) as response:
+                    status = getattr(response, "status", 200)
+                    payload = json.load(response)
+                if status != 200:
+                    last_error = f"health endpoint returned HTTP {status}"
+                elif not isinstance(payload, dict):
+                    last_error = "health endpoint returned invalid JSON"
+                elif payload.get("instance_id") != instance_id:
+                    last_error = "health endpoint reached a different gateway instance"
+                elif payload.get("snapshot_ready") is not True:
+                    last_error = "gateway snapshot is not ready"
+                else:
+                    return
+            except Exception as error:
+                last_error = f"{type(error).__name__}: {error}"
+
+            time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
+
+        raise RuntimeError(
+            "timed out waiting for the public metrics endpoint to become reachable: "
+            f"{last_error}"
+        )
+
     def stop(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
@@ -580,7 +635,17 @@ def run_gateway(args: argparse.Namespace) -> int:
         lease_acquired = True
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
+        server.gateway_state = "local_ready"
         public_url = tunnel.start(timeout_seconds=args.tunnel_timeout)
+        print(
+            f"[metrics-gateway] verifying public tunnel readiness at {public_url}",
+            flush=True,
+        )
+        tunnel.wait_until_ready(
+            public_url,
+            instance_id=instance_id,
+            timeout_seconds=args.public_readiness_timeout,
+        )
         registry.activate(instance_id, public_url, sha=lease_sha)
         server.gateway_state = "active"
         print(
@@ -641,6 +706,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allowed-origin", required=True)
     parser.add_argument("--cloudflared", default="cloudflared")
     parser.add_argument("--tunnel-timeout", type=float, default=30.0)
+    parser.add_argument("--public-readiness-timeout", type=float, default=90.0)
     parser.add_argument("--window-seconds", type=int, default=300)
     parser.add_argument("--live-rate-window-seconds", type=float, default=10.0)
     parser.add_argument("--caught-up-lag-seconds", type=float, default=10.0)

@@ -30,6 +30,7 @@ class ComponentSpec:
     critical: bool = False
     readiness_url: str | None = None
     startup_timeout_seconds: float = 0.0
+    readiness_statuses: tuple[str, ...] = ("active",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,8 @@ def build_component_specs(
             str(metrics.get("cloudflared_executable", "cloudflared")),
             "--tunnel-timeout",
             str(metrics.get("tunnel_timeout_seconds", 30)),
+            "--public-readiness-timeout",
+            str(metrics.get("public_readiness_timeout_seconds", 90)),
             "--window-seconds",
             str(metrics.get("window_seconds", 300)),
             "--live-rate-window-seconds",
@@ -125,6 +128,7 @@ def build_component_specs(
                     f"{metrics.get('port', 8765)}/health"
                 ),
                 startup_timeout_seconds=float(metrics.get("startup_timeout_seconds", 60)),
+                readiness_statuses=("local_ready", "active"),
             )
         )
 
@@ -291,7 +295,7 @@ class Coordinator:
             try:
                 with urlopen(spec.readiness_url, timeout=0.5) as response:
                     payload = json.load(response)
-                if payload.get("status") == "active":
+                if payload.get("status") in spec.readiness_statuses:
                     print(f"[coordinator] {spec.name} is ready", flush=True)
                     return True
             except (OSError, ValueError):

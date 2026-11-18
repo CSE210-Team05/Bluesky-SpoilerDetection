@@ -25,6 +25,7 @@
     "startup_timeout_seconds": 60,
     "tag_config": "config/spoiler_tags.json",
     "tunnel_timeout_seconds": 30,
+    "public_readiness_timeout_seconds": 90,
     "window_seconds": 300
   },
   "publishers": {

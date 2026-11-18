@@ -25,6 +25,7 @@ from metrics.gateway import (
     LeaseUnavailable,
     LiveRateTracker,
     MetricsHTTPServer,
+    QuickTunnel,
     SnapshotProvider,
     load_or_create_instance_id,
 )
@@ -470,6 +471,43 @@ def test_metrics_http_port_disallows_socket_reuse() -> None:
     assert MetricsHTTPServer.allow_reuse_port is False
 
 
+def test_quick_tunnel_waits_for_public_gateway_snapshot() -> None:
+    calls = 0
+
+    class RunningProcess:
+        def poll(self) -> None:
+            return None
+
+    def opener(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        assert request.full_url.startswith("https://example.trycloudflare.com/health?t=")
+        assert timeout <= 2.5
+        if calls == 1:
+            raise OSError("DNS is not ready")
+        return BytesIO(
+            json.dumps(
+                {
+                    "status": "local_ready",
+                    "instance_id": "instance-a",
+                    "snapshot_ready": True,
+                }
+            ).encode()
+        )
+
+    tunnel = QuickTunnel("cloudflared", "http://127.0.0.1:8765")
+    tunnel.process = RunningProcess()  # type: ignore[assignment]
+    tunnel.wait_until_ready(
+        "https://example.trycloudflare.com",
+        instance_id="instance-a",
+        timeout_seconds=1,
+        poll_seconds=0,
+        opener=opener,
+    )
+
+    assert calls == 2
+
+
 def test_live_rates_respond_to_recent_counter_changes() -> None:
     tracker = LiveRateTracker(window_seconds=10)
 
@@ -614,6 +652,8 @@ def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
     assert metrics.command[metrics.command.index("--port") + 1] == "8765"
     assert metrics.command[metrics.command.index("--live-rate-window-seconds") + 1] == "10"
     assert metrics.command[metrics.command.index("--caught-up-lag-seconds") + 1] == "10"
+    assert metrics.command[metrics.command.index("--public-readiness-timeout") + 1] == "90"
+    assert metrics.readiness_statuses == ("local_ready", "active")
 
 
 def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
