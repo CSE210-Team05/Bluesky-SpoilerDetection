@@ -243,14 +243,19 @@ the main processing path; a metrics outage must not stop ingestion, detection,
 or publication.
 
 The collector creates small snapshots containing no credentials, post contents,
-user identifiers, or administrative controls. A coordinator-managed HTTP
-gateway serves the current snapshot from a loopback port. The coordinator also
-starts an outbound Cloudflare Quick Tunnel and registers its temporary HTTPS URL
-in `docs/metrics-endpoint.json` on the isolated
+user identifiers, or administrative controls. A dedicated background sampler
+updates an in-memory aggregate snapshot; HTTP request threads only read the
+last completed snapshot and never query SQLite or acquire a queue lock. A slow
+or failed refresh therefore leaves the last good snapshot immediately
+available, together with its age and refresh status. A coordinator-managed HTTP
+gateway serves that snapshot from a loopback port. The coordinator also starts
+an outbound Cloudflare Quick Tunnel and registers its temporary HTTPS URL in
+`docs/metrics-endpoint.json` on the isolated
 `live-metrics-endpoint-registry` branch. The
 dashboard waits for an active registration and then polls the live endpoint
-once per second. Metric values are never committed and the frontend is not
-redeployed when they change.
+once per second. Browser requests are single-flight and time-bounded; a local
+watchdog visibly reports delayed or stale telemetry while reconnecting. Metric
+values are never committed and the frontend is not redeployed when they change.
 
 The gateway calculates displayed throughput from lifetime-counter deltas over
 a short in-memory window. This keeps the dashboard responsive without adding

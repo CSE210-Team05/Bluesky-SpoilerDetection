@@ -32,9 +32,10 @@ from Bluesky_interface.post_fetcher_interface import PostQueue
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_interface import LabelQueue
 
-INVALID_KEY_VALUE = "REPLACE_THIS_WITH_YOUR_KEY"
+INVALID_KEY_VALUE = "INVALID_PAT"
 
 API_VERSION = "2022-11-28"
+# Replce INVALID_KEY_VALUE with the key found in demo-values in slack
 DEMO_GITHUB_TOKEN = INVALID_KEY_VALUE
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
@@ -239,6 +240,8 @@ class GitHubEndpointRegistry:
 
 
 class SnapshotProvider:
+    """Continuously build snapshots without blocking HTTP request threads."""
+
     def __init__(
         self,
         post_database: Path,
@@ -260,22 +263,97 @@ class SnapshotProvider:
         self._lock = threading.Lock()
         self._snapshot: dict[str, Any] | None = None
         self._built_at = 0.0
+        self._last_error: str | None = None
+        self._stop_requested = threading.Event()
+        self._ready = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_reported_error: str | None = None
+        self._last_error_reported_at = 0.0
 
     def get(self) -> dict[str, Any]:
+        """Return the immutable snapshot reference without taking any lock."""
+        snapshot = self._snapshot
+        if snapshot is None:
+            detail = f": {self._last_error}" if self._last_error else ""
+            raise RuntimeError(f"metrics snapshot is not ready{detail}")
+        return snapshot
+
+    def status(self) -> dict[str, float | bool | str | None]:
         with self._lock:
-            now = time.time()
-            if self._snapshot is None or now - self._built_at >= self.minimum_refresh_seconds:
-                snapshot = build_snapshot(
-                    self.post_queue,
-                    self.label_queue,
-                    self.tag_config,
-                    window_seconds=self.window_seconds,
-                    caught_up_lag_seconds=self.caught_up_lag_seconds,
-                    now=now,
-                )
-                self._snapshot = self.rate_tracker.update(snapshot, now=now)
-                self._built_at = now
-            return self._snapshot
+            return {
+                "snapshot_ready": self._snapshot is not None,
+                "snapshot_age_seconds": (
+                    None
+                    if self._snapshot is None
+                    else max(0.0, time.time() - self._built_at)
+                ),
+                "snapshot_error": self._last_error,
+            }
+
+    def _refresh(self) -> None:
+        now = time.time()
+        snapshot = build_snapshot(
+            self.post_queue,
+            self.label_queue,
+            self.tag_config,
+            window_seconds=self.window_seconds,
+            caught_up_lag_seconds=self.caught_up_lag_seconds,
+            now=now,
+        )
+        snapshot = self.rate_tracker.update(snapshot, now=now)
+        with self._lock:
+            self._snapshot = snapshot
+            self._built_at = now
+            self._last_error = None
+        self._ready.set()
+
+    def _report_refresh_error(self, error: Exception) -> None:
+        message = f"{type(error).__name__}: {error}"
+        monotonic_now = time.monotonic()
+        with self._lock:
+            self._last_error = message
+            should_report = (
+                message != self._last_reported_error
+                or monotonic_now - self._last_error_reported_at >= 30
+            )
+            if should_report:
+                self._last_reported_error = message
+                self._last_error_reported_at = monotonic_now
+        if should_report:
+            print(
+                f"[metrics-gateway] snapshot refresh delayed: {message}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _run(self) -> None:
+        while not self._stop_requested.is_set():
+            started_at = time.monotonic()
+            try:
+                self._refresh()
+            except Exception as error:
+                self._report_refresh_error(error)
+            elapsed = time.monotonic() - started_at
+            self._stop_requested.wait(max(0.0, self.minimum_refresh_seconds - elapsed))
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_requested.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="metrics-snapshot-provider",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def wait_until_ready(self, timeout: float | None = None) -> bool:
+        return self._ready.wait(timeout)
+
+    def stop(self, *, timeout: float = 2.0) -> None:
+        self._stop_requested.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
 
 
 class LiveRateTracker:
@@ -362,10 +440,16 @@ class MetricsRequestHandler(BaseHTTPRequestHandler):
                 {
                     "status": self.server.gateway_state,
                     "instance_id": self.server.instance_id,
+                    **self.server.snapshot_provider.status(),
                 },
             )
         elif path == "/metrics":
-            self._send_json(200, self.server.snapshot_provider.get())
+            try:
+                snapshot = self.server.snapshot_provider.get()
+            except RuntimeError as error:
+                self._send_json(503, {"error": str(error)})
+            else:
+                self._send_json(200, snapshot)
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -491,6 +575,7 @@ def run_gateway(args: argparse.Namespace) -> int:
     server_thread: threading.Thread | None = None
     lease_acquired = False
     try:
+        snapshot_provider.start()
         lease_sha = registry.acquire(instance_id, force=args.force_lease)
         lease_acquired = True
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -520,6 +605,7 @@ def run_gateway(args: argparse.Namespace) -> int:
         server.server_close()
         if server_thread is not None:
             server_thread.join(timeout=2)
+        snapshot_provider.stop()
         if lease_acquired:
             try:
                 registry.release(instance_id)

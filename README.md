@@ -119,6 +119,12 @@ window. The persistent five-minute SQLite buckets remain available for coarse
 history, but no longer make the live display take minutes to reflect recovery
 or a change in incoming demand.
 
+The gateway computes aggregate snapshots on a background sampler. Dashboard
+requests read only the last completed in-memory snapshot, so a browser never
+touches the queue databases or waits on their locks. If refresh work is delayed,
+the last good values remain available and the dashboard shows their age while
+retrying with time-bounded, non-overlapping requests.
+
 Reader health is independent of throughput. Jetstream's `time_us` cursor is
 stored with stream health, and the dashboard reports **Up to date** when the
 reader is connected and the newest source event is no more than ten seconds

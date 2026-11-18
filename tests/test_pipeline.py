@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -22,6 +23,7 @@ from metrics.gateway import (
     LeaseUnavailable,
     LiveRateTracker,
     MetricsHTTPServer,
+    SnapshotProvider,
     load_or_create_instance_id,
 )
 from metrics.snapshot import build_snapshot
@@ -476,6 +478,57 @@ def test_live_rates_respond_to_recent_counter_changes() -> None:
     assert second["window_seconds"] == 10
 
 
+def test_metrics_requests_use_cached_snapshot_while_refresh_is_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second_refresh_started = threading.Event()
+    allow_second_refresh = threading.Event()
+    calls = 0
+
+    def build_test_snapshot(*_args, now: float, **_kwargs) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            second_refresh_started.set()
+            assert allow_second_refresh.wait(timeout=2)
+        return {
+            "generated_at": str(now),
+            "rates": {},
+            "totals": {
+                "ingested": calls,
+                "detected": calls,
+                "labels_enqueued": calls,
+                "published": calls,
+            },
+        }
+
+    monkeypatch.setattr("metrics.gateway.build_snapshot", build_test_snapshot)
+    provider = SnapshotProvider(
+        tmp_path / "posts.sqlite3",
+        tmp_path / "labels.sqlite3",
+        tmp_path / "tags.json",
+        window_seconds=60,
+        minimum_refresh_seconds=0.01,
+    )
+    provider.start()
+    try:
+        assert provider.wait_until_ready(timeout=1)
+        first = provider.get()
+        assert second_refresh_started.wait(timeout=1)
+
+        started_at = time.monotonic()
+        cached = provider.get()
+        elapsed = time.monotonic() - started_at
+
+        assert cached is first
+        assert elapsed < 0.05
+        assert provider.status()["snapshot_ready"] is True
+    finally:
+        allow_second_refresh.set()
+        provider.stop()
+
+
 def test_coordinator_builds_complete_process_group(tmp_path: Path) -> None:
     config = load_config(Path("config/pipeline.json"))
     source = tmp_path / "events.jsonl"
@@ -549,9 +602,12 @@ def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
     ) in app
     assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=6"' in index
+    assert 'src="app.js?v=7"' in index
     assert "Up to date" in app
     assert "Catching up" in app
+    assert "AbortController" in app
+    assert "refreshInFlight" in app
+    assert "updateWatchdog" in app
     assert '"docs/**"' not in workflow
     assert "docs/metrics.json" not in workflow
     assert "docs/metrics-endpoint.json" not in workflow

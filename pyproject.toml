@@ -28,3 +28,29 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.pylint.basic]
+# Main configuration setting everything to camelCase
+argument-naming-style = "camelCase"
+attr-naming-style = "camelCase"
+const-naming-style = "camelCase"
+function-naming-style = "camelCase"
+method-naming-style = "camelCase"
+variable-naming-style = "camelCase"
+# ``status_code`` mirrors the public requests.Response attribute in protocol
+# doubles and must retain that external spelling.
+good-names = ["tmp_path", "status_code"]
+
+# Setting Class names to PascalCase
+class-naming-style = "PascalCase"
+class-attribute-naming-style = "camelCase"
+
+# Python modules and packages use Python's conventional snake_case naming.
+module-naming-style = "snake_case"
+
+[tool.pylint.messages_control]
+# This repository adopted Pylint specifically as its identifier-name checker.
+# Broader correctness and complexity policy can be introduced separately
+# without folding hundreds of unrelated legacy findings into this migration.
+disable = ["all"]
+enable = ["invalid-name"]
