@@ -2,11 +2,11 @@
 
 [![Documentation site](https://github.com/CSE210-Team05/Bluesky-SpoilerDetection/actions/workflows/documentation.yml/badge.svg)](https://github.com/CSE210-Team05/Bluesky-SpoilerDetection/actions/workflows/documentation.yml)
 
-The [rendered project documentation](https://cse210-team05.github.io/Bluesky-SpoilerDetection/)
-covers the pipeline contract, operations, and enforced quality gates. Its source
-is versioned under [`documentation/`](documentation/index.md), validated on every
-pull request, and published to GitHub Pages after documentation changes reach
-`main`.
+[Project documentation](documentation/index.md) covers the pipeline contract,
+operations, and enforced quality gates. This branch-relative link always shows
+the documentation belonging to the commit or pull request being viewed. CI
+validates it on every pull request; the rendered documentation from `main` is
+published separately on [GitHub Pages](https://cse210-team05.github.io/Bluesky-SpoilerDetection/).
 
 First-pass implementation of the queue-based pipeline described in
 [`architecture.md`](architecture.md):

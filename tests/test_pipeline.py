@@ -931,5 +931,7 @@ def test_rendered_documentation_has_a_public_deployment() -> None:
     assert "actions/upload-pages-artifact@v5" in workflow
     assert "actions/deploy-pages@v5" in workflow
     assert site_url in workflow
+    assert "[Project documentation](documentation/index.md)" in readme
+    assert "rendered documentation from `main`" in readme
     assert site_url in readme
     assert f"site_url: {site_url}" in mkdocs
