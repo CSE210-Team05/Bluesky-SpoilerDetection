@@ -32,11 +32,13 @@ from Bluesky_interface.post_fetcher_interface import PostQueue
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_interface import LabelQueue
 
+INVALID_KEY_VALUE = "REPLACE_THIS_WITH_YOUR_KEY"
 
 API_VERSION = "2022-11-28"
-DEMO_GITHUB_TOKEN = "REVOKED_GITHUB_TOKEN"
+DEMO_GITHUB_TOKEN = INVALID_KEY_VALUE
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+
 
 
 class LeaseUnavailable(RuntimeError):
@@ -532,6 +534,9 @@ def run_gateway(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if (DEMO_GITHUB_TOKEN == INVALID_KEY_VALUE):
+        raise ValueError("Replace value of DEMO_GITHUB_TOKEN in metrics/gateway.py with PAT token found in slack.")
+    
     parser = argparse.ArgumentParser(description="Expose live metrics through an outbound tunnel")
     parser.add_argument("--post-database", type=Path, default=Path("data/posts.sqlite3"))
     parser.add_argument("--label-database", type=Path, default=Path("data/labels.sqlite3"))
