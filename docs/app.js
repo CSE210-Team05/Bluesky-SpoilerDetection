@@ -114,8 +114,14 @@ function renderHealth(stream, generated, queues) {
   const sourceLag = stream.source_lag_seconds == null
     ? null
     : Number(stream.source_lag_seconds) + ageSeconds;
+  const lastEventAge = stream.last_event_age_seconds == null
+    ? null
+    : Number(stream.last_event_age_seconds) + ageSeconds;
   const threshold = Number(stream.caught_up_lag_seconds || 10);
   const caughtUp = Boolean(stream.connected) && sourceLag != null && sourceLag <= threshold;
+  const sourceStalled = Boolean(stream.connected)
+    && lastEventAge != null
+    && lastEventAge > 30;
   const maximumQueueAge = Math.max(
     Number(queues.posts.oldest_job_age_seconds || 0),
     Number(queues.labels.oldest_job_age_seconds || 0),
@@ -133,6 +139,13 @@ function renderHealth(stream, generated, queues) {
     byId("health-title").textContent = "Telemetry disconnected";
     byId("health-description").textContent = "The dashboard is waiting for a current reader and metrics snapshot.";
     byId("freshness").textContent = `Disconnected · snapshot ${generated.toLocaleTimeString()}`;
+  } else if (sourceStalled) {
+    ring.classList.add("error");
+    statusDot.classList.add("stale");
+    byId("health-ring-label").textContent = "Stalled";
+    byId("health-title").textContent = "Reader stream is not advancing";
+    byId("health-description").textContent = "The gateway is responsive, but Jetstream has delivered no recent events. The reader will reconnect automatically.";
+    byId("freshness").textContent = `No source events for ${formatLag(lastEventAge)}`;
   } else if (!caughtUp || maximumQueueAge > 60) {
     ring.classList.add("warning");
     statusDot.classList.add("warning");

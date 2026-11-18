@@ -7,7 +7,7 @@ import asyncio
 import json
 from pathlib import Path
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from Bluesky_interface.post_fetcher_interface import POST_COLLECTION, PostJob, PostQueue
@@ -97,15 +97,28 @@ def build_jetstream_url(
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
+async def receive_jetstream_message(websocket: Any, idle_timeout: float) -> str | bytes:
+    """Receive one event or force a reconnect when the stream stops advancing."""
+    if idle_timeout <= 0:
+        raise ValueError("Jetstream idle timeout must be positive")
+    try:
+        return await asyncio.wait_for(websocket.recv(), timeout=idle_timeout)
+    except TimeoutError as error:
+        raise RuntimeError(
+            f"Jetstream delivered no events for {idle_timeout:g} seconds"
+        ) from error
+
+
 async def run_live_reader(
     reader: PostReader,
-    endpoint: str,
+    endpoint: str | Sequence[str],
     *,
     collection: str = POST_COLLECTION,
     max_events: int | None = None,
     open_timeout: float = 10.0,
     ping_interval: float = 20.0,
     ping_timeout: float = 20.0,
+    idle_timeout: float = 30.0,
     max_message_bytes: int = 4 * 1024 * 1024,
     initial_backoff: float = 1.0,
     maximum_backoff: float = 30.0,
@@ -118,15 +131,27 @@ async def run_live_reader(
             "live ingestion requires the 'websockets' package; install the project dependencies"
         ) from error
 
+    endpoints = (endpoint,) if isinstance(endpoint, str) else tuple(endpoint)
+    if not endpoints:
+        raise ValueError("at least one Jetstream endpoint is required")
+    for configured_endpoint in endpoints:
+        build_jetstream_url(configured_endpoint, collection=collection)
+
     received = 0
     accepted = 0
     invalid = 0
     connections = 0
+    endpoint_index = 0
     backoff = initial_backoff
 
     while max_events is None or received < max_events:
+        current_endpoint = endpoints[endpoint_index]
         cursor = reader.queue.get_cursor(reader.stream_id)
-        url = build_jetstream_url(endpoint, collection=collection, cursor=cursor)
+        url = build_jetstream_url(
+            current_endpoint,
+            collection=collection,
+            cursor=cursor,
+        )
         try:
             async with connect(
                 url,
@@ -149,11 +174,13 @@ async def run_live_reader(
                             "stream": reader.stream_id,
                             "connected": True,
                             "cursor": cursor,
+                            "endpoint": current_endpoint,
                         }
                     ),
                     flush=True,
                 )
-                async for message in websocket:
+                while max_events is None or received < max_events:
+                    message = await receive_jetstream_message(websocket, idle_timeout)
                     received += 1
                     try:
                         if isinstance(message, bytes):
@@ -179,8 +206,10 @@ async def run_live_reader(
                 json.dumps(
                     {
                         "stream": reader.stream_id,
+                        "endpoint": current_endpoint,
                         "connection_error": f"{type(error).__name__}: {error}",
                         "retry_seconds": backoff,
+                        "next_endpoint": endpoints[(endpoint_index + 1) % len(endpoints)],
                     }
                 ),
                 file=sys.stderr,
@@ -189,6 +218,7 @@ async def run_live_reader(
         finally:
             reader.queue.set_stream_connected(reader.stream_id, False)
 
+        endpoint_index = (endpoint_index + 1) % len(endpoints)
         await asyncio.sleep(backoff)
         backoff = min(maximum_backoff, max(initial_backoff, backoff * 2))
 
@@ -214,12 +244,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stream-id", default="jetstream-jsonl")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--input", type=Path, help="development JSON Lines replay file")
-    source.add_argument("--endpoint", help="live Jetstream ws:// or wss:// endpoint")
+    source.add_argument(
+        "--endpoint",
+        action="append",
+        help="live Jetstream endpoint; repeat to configure failover hosts",
+    )
     parser.add_argument("--collection", default=POST_COLLECTION)
     parser.add_argument("--max-events", type=int, help="exit after receiving this many live messages")
     parser.add_argument("--open-timeout", type=float, default=10.0)
     parser.add_argument("--ping-interval", type=float, default=20.0)
     parser.add_argument("--ping-timeout", type=float, default=20.0)
+    parser.add_argument("--idle-timeout", type=float, default=30.0)
     parser.add_argument("--max-message-bytes", type=int, default=4 * 1024 * 1024)
     args = parser.parse_args(argv)
 
@@ -235,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
                 open_timeout=args.open_timeout,
                 ping_interval=args.ping_interval,
                 ping_timeout=args.ping_timeout,
+                idle_timeout=args.idle_timeout,
                 max_message_bytes=args.max_message_bytes,
             )
         )

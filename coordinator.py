@@ -188,11 +188,16 @@ def build_component_specs(
         configured_input = input_override if input_override is not None else reader.get("input")
         if configured_input:
             command.extend(("--input", _path_argument(configured_input)))
-        elif reader.get("endpoint"):
+        elif reader.get("endpoints") or reader.get("endpoint"):
+            configured_endpoints = reader.get("endpoints")
+            if configured_endpoints is None:
+                configured_endpoints = [reader["endpoint"]]
+            if not isinstance(configured_endpoints, list) or not configured_endpoints:
+                raise ValueError("reader.endpoints must be a non-empty array")
+            for endpoint in configured_endpoints:
+                command.extend(("--endpoint", str(endpoint)))
             command.extend(
                 (
-                    "--endpoint",
-                    str(reader["endpoint"]),
                     "--collection",
                     str(reader.get("collection", "app.bsky.feed.post")),
                     "--open-timeout",
@@ -201,6 +206,8 @@ def build_component_specs(
                     str(reader.get("ping_interval", 20)),
                     "--ping-timeout",
                     str(reader.get("ping_timeout", 20)),
+                    "--idle-timeout",
+                    str(reader.get("idle_timeout_seconds", 30)),
                     "--max-message-bytes",
                     str(reader.get("max_message_bytes", 4 * 1024 * 1024)),
                 )

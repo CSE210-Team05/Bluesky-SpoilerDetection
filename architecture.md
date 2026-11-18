@@ -139,6 +139,14 @@ collection. It ignores updates, deletes, and all other collections and event
 types. It durably enqueues each accepted post before advancing its stored
 stream cursor.
 
+Transport pings alone do not prove that the application stream is advancing.
+If an open Jetstream WebSocket delivers no events within the configured idle
+timeout, the reader marks it disconnected and reconnects from the durable
+cursor on the next configured public instance. Connection errors rotate through
+the same endpoint pool. This turns a silent upstream stall into an observable
+recovery cycle and prevents one unhealthy Jetstream host from stopping the
+pipeline.
+
 The reader must remain lightweight: read, filter, extract the post and its
 identifiers, enqueue it, and continue. Detection never runs in the reader.
 

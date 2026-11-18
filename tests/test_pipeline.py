@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 from io import BytesIO
 from pathlib import Path
@@ -14,6 +15,7 @@ from Bluesky_interface.post_fetcher_core.post_fetcher import (
     PostReader,
     build_jetstream_url,
     parse_jetstream_event,
+    receive_jetstream_message,
 )
 from Bluesky_interface.post_fetcher_interface import PostJob, PostQueue
 from coordinator import build_component_specs, load_config, load_supervision_settings
@@ -156,6 +158,23 @@ def test_jetstream_url_uses_post_filter_and_durable_cursor() -> None:
         "wss://jetstream.example/subscribe?unrelated=value&"
         "wantedCollections=app.bsky.feed.post&cursor=123456"
     )
+
+
+def test_jetstream_idle_timeout_detects_a_silent_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SilentWebsocket:
+        async def recv(self) -> str:
+            return "never reached"
+
+    async def raise_timeout(awaitable, *, timeout):
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", raise_timeout)
+    receive = receive_jetstream_message(SilentWebsocket(), 0.01)
+    with pytest.raises(RuntimeError, match="delivered no events"):
+        receive.send(None)
 
 
 def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
@@ -559,7 +578,12 @@ def test_coordinator_does_not_require_reader_input_file() -> None:
 
     assert "--input" not in reader.command
     assert "--endpoint" in reader.command
-    assert "wss://jetstream2.us-west.bsky.network/subscribe" in reader.command
+    endpoint_values = [
+        reader.command[index + 1]
+        for index, value in enumerate(reader.command)
+        if value == "--endpoint"
+    ]
+    assert endpoint_values == config["reader"]["endpoints"]
 
 
 def test_coordinator_can_bound_live_smoke_test() -> None:
@@ -572,6 +596,7 @@ def test_coordinator_can_bound_live_smoke_test() -> None:
     reader = next(spec for spec in specs if spec.is_reader)
 
     assert reader.command[reader.command.index("--max-events") + 1] == "25"
+    assert reader.command[reader.command.index("--idle-timeout") + 1] == "30"
 
 
 def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
@@ -602,12 +627,13 @@ def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
     ) in app
     assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=7"' in index
+    assert 'src="app.js?v=8"' in index
     assert "Up to date" in app
     assert "Catching up" in app
     assert "AbortController" in app
     assert "refreshInFlight" in app
     assert "updateWatchdog" in app
+    assert "Reader stream is not advancing" in app
     assert '"docs/**"' not in workflow
     assert "docs/metrics.json" not in workflow
     assert "docs/metrics-endpoint.json" not in workflow

@@ -9,8 +9,8 @@ reader -> SQLite post queue -> detector workers -> SQLite label queue -> publish
 
 ![Bluesky spoiler detection pipeline workflow](Workflow.png)
 
-The live reader connects to Bluesky's public Jetstream JSON WebSocket and asks
-the server for `app.bsky.feed.post` events only. JSON Lines replay remains
+The live reader rotates across Bluesky's public Jetstream JSON WebSockets and
+asks each server for `app.bsky.feed.post` events only. JSON Lines replay remains
 available for development, and the publisher is deliberately dry-run-only until
 a real AT Protocol labeling client and credentials are configured.
 
@@ -130,6 +130,9 @@ stored with stream health, and the dashboard reports **Up to date** when the
 reader is connected and the newest source event is no more than ten seconds
 behind wall-clock time. A low rate with an up-to-date cursor means current
 demand is low; **Catching up** means the reader is still consuming older events.
+If the WebSocket remains open but delivers no events for 30 seconds, the reader
+forces a reconnect from its durable cursor on the next configured Jetstream
+instance instead of remaining silently stuck on one unhealthy host.
 
 The OS socket bind rejects a second gateway on the same host. A SHA-guarded
 registry lease rejects a coordinator from another installation if one is

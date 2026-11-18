@@ -36,7 +36,13 @@
   "reader": {
     "collection": "app.bsky.feed.post",
     "enabled": true,
-    "endpoint": "wss://jetstream2.us-west.bsky.network/subscribe",
+    "endpoints": [
+      "wss://jetstream1.us-west.bsky.network/subscribe",
+      "wss://jetstream2.us-west.bsky.network/subscribe",
+      "wss://jetstream1.us-east.bsky.network/subscribe",
+      "wss://jetstream2.us-east.bsky.network/subscribe"
+    ],
+    "idle_timeout_seconds": 30,
     "input": null,
     "max_events": null,
     "max_message_bytes": 4194304,
