@@ -93,4 +93,4 @@ async function refresh() {
 }
 
 refresh();
-window.setInterval(refresh, 60_000);
+window.setInterval(refresh, 5_000);
