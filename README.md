@@ -73,6 +73,11 @@ locally before pushing:
 bash scripts/prepare-pages.sh
 ```
 
+If the published site displays this repository README, GitHub Pages is still
+using **Deploy from a branch** and publishing the repository root. Change the
+Pages source to **GitHub Actions**. A root `index.html` redirect is included as
+a fallback, but the Actions source is the intended deployment mode.
+
 Create a fine-grained token limited to this repository with **Contents: write**
 permission. Store it only on the pipeline machine:
 

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "index.html"
       - "scripts/prepare-pages.sh"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
