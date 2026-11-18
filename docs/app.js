@@ -28,8 +28,8 @@ function formatLag(seconds) {
   return `${(seconds / 60).toFixed(1)}m`;
 }
 
-function formatDuration(seconds) {
-  if (seconds == null) return "No recent claims";
+function formatDuration(seconds, unavailable = "No recent claims") {
+  if (seconds == null) return unavailable;
   const value = Number(seconds);
   if (value < 0.001) return "<1ms";
   if (value < 1) return `${(value * 1_000).toFixed(value < 0.01 ? 2 : 1)}ms`;
@@ -133,7 +133,10 @@ function renderWorkerPool(prefix, pool) {
   byId(`${prefix}-utilization`).textContent = `${utilization.toFixed(0)}%`;
   const shards = byId(`${prefix}-shards`);
   if (shards) shards.textContent = formatInteger(pool.shards || 0);
-  byId(`${prefix}-queue-wait`).textContent = formatDuration(pool.average_queue_wait_seconds);
+  byId(`${prefix}-traversal`).textContent = formatDuration(
+    pool.average_traversal_seconds,
+    "No recent completions",
+  );
   byId(`${prefix}-db-wait`).textContent = formatDuration(pool.average_claim_seconds);
   byId(`${prefix}-worker-fill`).style.width = `${Math.min(100, utilization)}%`;
 }

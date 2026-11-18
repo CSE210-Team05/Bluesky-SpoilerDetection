@@ -71,7 +71,6 @@ def _jobs(event_count: int) -> list[PostJob]:
             post_cid=f"benchmark-cid-{sequence}",
             author_did="did:plc:benchmark",
             text="Representative spoiler post body used for throughput measurement",
-            received_at=1.0,
         )
         for sequence in range(1, event_count + 1)
     ]

@@ -217,7 +217,7 @@
             <dl class="worker-facts">
               <div><dt>Utilization</dt><dd id="detector-utilization">--</dd></div>
               <div><dt>Post shards</dt><dd id="detector-shards">--</dd></div>
-              <div><dt>Avg queue wait</dt><dd id="detector-queue-wait">--</dd></div>
+              <div><dt>Avg ingest → classify</dt><dd id="detector-traversal">--</dd></div>
               <div><dt>Avg DB claim</dt><dd id="detector-db-wait">--</dd></div>
             </dl>
           </article>
@@ -231,12 +231,12 @@
             <dl class="worker-facts">
               <div><dt>Utilization</dt><dd id="publisher-utilization">--</dd></div>
               <div><dt>Label shards</dt><dd id="publisher-shards">--</dd></div>
-              <div><dt>Avg queue wait</dt><dd id="publisher-queue-wait">--</dd></div>
+              <div><dt>Avg ingest → publish</dt><dd id="publisher-traversal">--</dd></div>
               <div><dt>Avg DB claim</dt><dd id="publisher-db-wait">--</dd></div>
             </dl>
           </article>
         </div>
-        <p class="worker-note">Busy means the worker holds an active queue lease. DB claim includes SQLite lock wait and claim-query time.</p>
+        <p class="worker-note">Traversal begins when the reader accepts a post and ends at classification or publication acknowledgement. DB claim includes SQLite lock wait and claim-query time.</p>
       </section>
 
       <section class="content-grid lower-grid">

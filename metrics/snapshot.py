@@ -98,8 +98,8 @@ def build_snapshot(
                     if detector_workers == 0
                     else 100.0 * float(posts["busy_workers"]) / detector_workers
                 ),
-                "average_queue_wait_seconds": posts["average_queue_wait_seconds"],
                 "average_claim_seconds": posts["average_claim_seconds"],
+                "average_traversal_seconds": posts["average_traversal_seconds"],
             },
             "publishers": {
                 "configured": publisher_workers,
@@ -114,8 +114,8 @@ def build_snapshot(
                     if publisher_workers == 0
                     else 100.0 * float(labels["busy_workers"]) / publisher_workers
                 ),
-                "average_queue_wait_seconds": labels["average_queue_wait_seconds"],
                 "average_claim_seconds": labels["average_claim_seconds"],
+                "average_traversal_seconds": labels["average_traversal_seconds"],
             },
         },
         "totals": {

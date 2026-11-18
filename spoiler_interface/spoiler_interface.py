@@ -26,6 +26,7 @@ class LabelJob:
     label_value: str
     detected_at: float
     detector_version: str
+    pipeline_started_at: float
 
     @classmethod
     def create(
@@ -36,15 +37,22 @@ class LabelJob:
         label_value: str,
         detector_version: str,
         detected_at: float | None = None,
+        pipeline_started_at: float | None = None,
     ) -> "LabelJob":
         identity = f"{post_uri}\0{post_cid}\0{label_value}".encode()
+        detection_timestamp = time.time() if detected_at is None else detected_at
         return cls(
             job_id=sha256(identity).hexdigest(),
             post_uri=post_uri,
             post_cid=post_cid,
             label_value=label_value,
-            detected_at=time.time() if detected_at is None else detected_at,
+            detected_at=detection_timestamp,
             detector_version=detector_version,
+            pipeline_started_at=(
+                detection_timestamp
+                if pipeline_started_at is None
+                else pipeline_started_at
+            ),
         )
 
 
@@ -101,6 +109,7 @@ class LabelQueue:
                     label_value TEXT NOT NULL,
                     detected_at REAL NOT NULL,
                     detector_version TEXT NOT NULL,
+                    pipeline_started_at REAL NOT NULL,
                     enqueued_at REAL NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'leased', 'dead')),
@@ -146,10 +155,24 @@ class LabelQueue:
                     claimed INTEGER NOT NULL DEFAULT 0,
                     claim_wait_seconds REAL NOT NULL DEFAULT 0,
                     claim_transactions INTEGER NOT NULL DEFAULT 0,
-                    claim_db_seconds REAL NOT NULL DEFAULT 0
+                    claim_db_seconds REAL NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    traversal_seconds REAL NOT NULL DEFAULT 0
                 );
                 """
             )
+            job_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(label_jobs)")
+            }
+            if "pipeline_started_at" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE label_jobs ADD COLUMN pipeline_started_at REAL"
+                )
+                connection.execute(
+                    "UPDATE label_jobs SET pipeline_started_at = detected_at "
+                    "WHERE pipeline_started_at IS NULL"
+                )
             metric_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(label_metric_buckets)")
@@ -159,6 +182,8 @@ class LabelQueue:
                 ("claim_wait_seconds", "REAL NOT NULL DEFAULT 0"),
                 ("claim_transactions", "INTEGER NOT NULL DEFAULT 0"),
                 ("claim_db_seconds", "REAL NOT NULL DEFAULT 0"),
+                ("completed", "INTEGER NOT NULL DEFAULT 0"),
+                ("traversal_seconds", "REAL NOT NULL DEFAULT 0"),
             ):
                 if column not in metric_columns:
                     connection.execute(
@@ -198,8 +223,9 @@ class LabelQueue:
                     """
                     INSERT OR IGNORE INTO label_jobs(
                         job_id, post_uri, post_cid, label_value, detected_at,
-                        detector_version, enqueued_at, available_at
-                    ) SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                        detector_version, pipeline_started_at, enqueued_at,
+                        available_at
+                    ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
                     WHERE NOT EXISTS (
                         SELECT 1 FROM published_labels WHERE job_id = ?
                     )
@@ -211,6 +237,7 @@ class LabelQueue:
                         job.label_value,
                         job.detected_at,
                         job.detector_version,
+                        job.pipeline_started_at,
                         timestamp,
                         timestamp,
                         job.job_id,
@@ -314,7 +341,8 @@ class LabelQueue:
             try:
                 row = connection.execute(
                     """
-                    SELECT job_id, post_uri, post_cid, label_value
+                    SELECT job_id, post_uri, post_cid, label_value,
+                           pipeline_started_at
                     FROM label_jobs
                     WHERE job_id = ? AND status = 'leased' AND leased_by = ?
                     """,
@@ -341,6 +369,25 @@ class LabelQueue:
                         "UPDATE label_queue_totals SET published = published + 1 WHERE singleton = 1"
                     )
                     self._increment_metric(connection, "published", 1, timestamp)
+                    bucket = int(timestamp // 60) * 60
+                    connection.execute(
+                        """
+                        INSERT INTO label_metric_buckets(
+                            bucket, completed, traversal_seconds
+                        ) VALUES (?, 1, ?)
+                        ON CONFLICT(bucket) DO UPDATE SET
+                            completed = completed + 1,
+                            traversal_seconds = traversal_seconds
+                                + excluded.traversal_seconds
+                        """,
+                        (
+                            bucket,
+                            max(
+                                0.0,
+                                timestamp - float(row["pipeline_started_at"]),
+                            ),
+                        ),
+                    )
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -433,7 +480,9 @@ class LabelQueue:
                        COALESCE(SUM(claimed), 0) AS claimed,
                        COALESCE(SUM(claim_wait_seconds), 0) AS claim_wait_seconds,
                        COALESCE(SUM(claim_transactions), 0) AS claim_transactions,
-                       COALESCE(SUM(claim_db_seconds), 0) AS claim_db_seconds
+                       COALESCE(SUM(claim_db_seconds), 0) AS claim_db_seconds,
+                       COALESCE(SUM(completed), 0) AS completed,
+                       COALESCE(SUM(traversal_seconds), 0) AS traversal_seconds
                 FROM label_metric_buckets WHERE bucket >= ?
                 """,
                 (first_bucket,),
@@ -445,6 +494,7 @@ class LabelQueue:
         leased = min(depth, int(leased_row["leased"] or 0))
         claimed = int(rates["claimed"] or 0)
         claim_transactions = int(rates["claim_transactions"] or 0)
+        completed = int(rates["completed"] or 0)
         oldest = oldest_row["oldest"]
         return {
             "available": depth - leased,
@@ -465,10 +515,17 @@ class LabelQueue:
                 if claim_transactions == 0
                 else float(rates["claim_db_seconds"]) / claim_transactions
             ),
+            "average_traversal_seconds": (
+                None
+                if completed == 0
+                else float(rates["traversal_seconds"]) / completed
+            ),
             "recent_claimed": claimed,
             "recent_claim_wait_seconds": float(rates["claim_wait_seconds"]),
             "recent_claim_transactions": claim_transactions,
             "recent_claim_db_seconds": float(rates["claim_db_seconds"]),
+            "recent_completed": completed,
+            "recent_traversal_seconds": float(rates["traversal_seconds"]),
             "enqueued_total": int(totals["enqueued"]),
             "published_total": int(totals["published"]),
             "retried_total": int(totals["retried"]),
@@ -484,6 +541,7 @@ class LabelQueue:
             label_value=row["label_value"],
             detected_at=float(row["detected_at"]),
             detector_version=row["detector_version"],
+            pipeline_started_at=float(row["pipeline_started_at"]),
         )
 
 
@@ -586,6 +644,7 @@ def rectify_label_shards(database: str | Path, shard_count: int) -> list[Path]:
     metric_names = (
         "enqueued", "published", "retried", "dead_lettered", "claimed",
         "claim_wait_seconds", "claim_transactions", "claim_db_seconds",
+        "completed", "traversal_seconds",
     )
     try:
         for path in building_paths:
@@ -598,6 +657,10 @@ def rectify_label_shards(database: str | Path, shard_count: int) -> list[Path]:
             with sqlite3.connect(source_path) as source:
                 source.row_factory = sqlite3.Row
                 source.execute("BEGIN IMMEDIATE")
+                source_job_columns = {
+                    str(row["name"])
+                    for row in source.execute("PRAGMA table_info(label_jobs)")
+                }
                 for row in source.execute("SELECT * FROM label_jobs"):
                     shard_index = int(str(row["job_id"])[:16], 16) % shard_count
                     status = str(row["status"])
@@ -607,14 +670,21 @@ def rectify_label_shards(database: str | Path, shard_count: int) -> list[Path]:
                         """
                         INSERT OR IGNORE INTO label_jobs(
                             job_id, post_uri, post_cid, label_value, detected_at,
-                            detector_version, enqueued_at, status, available_at,
-                            lease_until, leased_by, attempt_count, last_error
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            detector_version, pipeline_started_at, enqueued_at,
+                            status, available_at, lease_until, leased_by,
+                            attempt_count, last_error
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             row["job_id"], row["post_uri"], row["post_cid"],
                             row["label_value"], row["detected_at"],
-                            row["detector_version"], row["enqueued_at"], status,
+                            row["detector_version"],
+                            (
+                                row["pipeline_started_at"]
+                                if "pipeline_started_at" in source_job_columns
+                                else row["detected_at"]
+                            ),
+                            row["enqueued_at"], status,
                             min(float(row["available_at"]), time.time())
                             if row["status"] == "leased" else row["available_at"],
                             None if row["status"] == "leased" else row["lease_until"],
@@ -701,8 +771,8 @@ def rectify_label_shards(database: str | Path, shard_count: int) -> list[Path]:
                 INSERT INTO label_metric_buckets(
                     bucket, enqueued, published, retried, dead_lettered,
                     claimed, claim_wait_seconds, claim_transactions,
-                    claim_db_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    claim_db_seconds, completed, traversal_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (bucket, *(values[name] for name in metric_names)),
             )
@@ -825,7 +895,8 @@ class ShardedLabelQueue:
             "enqueued_rate_per_second", "publish_rate_per_second",
             "retry_rate_per_second", "recent_claimed",
             "recent_claim_wait_seconds", "recent_claim_transactions",
-            "recent_claim_db_seconds", "enqueued_total", "published_total",
+            "recent_claim_db_seconds", "recent_completed",
+            "recent_traversal_seconds", "enqueued_total", "published_total",
             "retried_total", "dead_lettered_total",
         )
         result: dict[str, float | int | None] = {
@@ -834,7 +905,7 @@ class ShardedLabelQueue:
         }
         for name in (
             "available", "leased", "busy_workers", "dead", "recent_claimed",
-            "recent_claim_transactions", "enqueued_total", "published_total",
+            "recent_claim_transactions", "recent_completed", "enqueued_total", "published_total",
             "retried_total", "dead_lettered_total",
         ):
             result[name] = int(result[name] or 0)
@@ -849,6 +920,12 @@ class ShardedLabelQueue:
             None
             if transactions == 0
             else float(result["recent_claim_db_seconds"] or 0) / transactions
+        )
+        completed = int(result["recent_completed"] or 0)
+        result["average_traversal_seconds"] = (
+            None
+            if completed == 0
+            else float(result["recent_traversal_seconds"] or 0) / completed
         )
         ages = [
             float(snapshot["oldest_job_age_seconds"])
@@ -1036,6 +1113,7 @@ class SpoilerWorkerInterface:
                     label_value=self.label_value,
                     detector_version=self.detector_version,
                     detected_at=completion.detected_at,
+                    pipeline_started_at=completion.delivery.job.received_at,
                 )
             )
         acknowledged = self.post_queue.acknowledge(

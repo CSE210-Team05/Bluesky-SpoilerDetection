@@ -305,7 +305,8 @@ The dashboard displays:
 
 - the current tags or label values that classify a post as a spoiler;
 - configured and currently busy detector and publisher workers;
-- worker utilization, average queue wait, and average SQLite claim time;
+- worker utilization, completion-based traversal time, and average SQLite
+  claim time;
 - ingestion rate: accepted post-create jobs enqueued per unit of time;
 - label rate: positive spoiler classifications enqueued per unit of time;
 - publish rate: labels successfully published per unit of time;
@@ -317,6 +318,12 @@ The dashboard displays:
 Rates alone show throughput, while queue depth and oldest-job age reveal where
 work is accumulating. The dashboard remains informational and cannot change
 the active spoiler tags or any runtime configuration.
+
+Latency is measured at durable completion rather than at claim time. The post
+receipt timestamp follows positive jobs into the label queue, allowing the
+publisher metric to report reader acceptance through publication
+acknowledgement. Detector traversal ends at durable classification. SQLite
+claim duration remains separate as a database-contention diagnostic.
 
 ## Data Flow
 

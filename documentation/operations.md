@@ -50,5 +50,12 @@ completed per second, while **Positive labels** counts only posts matching a
 configured tag. Use detector throughput—not positive-label production—to assess
 processing capacity and compare it with ingestion and queue age.
 
+Worker latency is completion-based rather than claim-based. Detector traversal
+measures reader acceptance through durable classification, and publisher
+traversal measures reader acceptance through publication acknowledgement. This
+includes queue residence, processing, asynchronous persistence, and retries.
+SQLite claim time remains separate so lock contention can be diagnosed without
+mistaking it for front-to-back latency.
+
 Use `Ctrl-C` for coordinated shutdown. A finite replay exits automatically
 after the reader reaches EOF and both queues drain.

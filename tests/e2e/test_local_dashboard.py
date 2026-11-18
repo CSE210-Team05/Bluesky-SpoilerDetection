@@ -199,8 +199,11 @@ def test_coordinator_renders_processed_event_in_local_dashboard(
         expect(page.locator("#detector-shards")).to_have_text("2")
         expect(page.locator("#publisher-workers")).to_contain_text("/ 2 busy")
         expect(page.locator("#publisher-shards")).to_have_text("2")
-        expect(page.locator("#detector-queue-wait")).not_to_have_text(
-            "No recent claims"
+        expect(page.locator("#detector-traversal")).not_to_have_text(
+            "No recent completions"
+        )
+        expect(page.locator("#publisher-traversal")).not_to_have_text(
+            "No recent completions"
         )
         expect(page.locator("#detector-db-wait")).not_to_have_text(
             "No recent claims"

@@ -112,6 +112,28 @@ def test_post_queue_migrates_existing_stream_health_for_source_lag(tmp_path: Pat
     assert "source_event_at" in columns
 
 
+def test_label_queue_migrates_pipeline_start_timestamp(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-labels.sqlite3"
+    queue = LabelQueue(database)
+    job = LabelJob.create(
+        post_uri="at://did:plc:test/app.bsky.feed.post/legacy",
+        post_cid="legacy-cid",
+        label_value="spoiler",
+        detector_version="legacy-v1",
+        detected_at=50.0,
+        pipeline_started_at=40.0,
+    )
+    assert queue.enqueue(job, now=51.0)
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE label_jobs DROP COLUMN pipeline_started_at")
+
+    migrated = LabelQueue(database)
+    claimed = migrated.claim("publisher-a", now=52.0)
+
+    assert len(claimed) == 1
+    assert claimed[0].job.pipeline_started_at == 50.0
+
+
 def test_metrics_adapters_can_open_without_schema_writes(tmp_path: Path) -> None:
     post_database = tmp_path / "posts.sqlite3"
     label_database = tmp_path / "labels.sqlite3"
@@ -356,6 +378,7 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
     claimed = labels.claim("publisher-a", limit=10)
     assert len(claimed) == 1
     assert claimed[0].job.post_cid == positive.post_cid
+    assert claimed[0].job.pipeline_started_at == positive.received_at
     assert {delivery.job.label_value for delivery in claimed} == {"spoiler"}
 
     duplicate = LabelJob.create(
@@ -527,7 +550,7 @@ def test_metrics_snapshot_combines_both_interfaces(tmp_path: Path) -> None:
     assert snapshot["workers"]["window_seconds"] == 60
 
 
-def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
+def test_queue_metrics_report_busy_workers_and_completion_traversal(
     tmp_path: Path,
 ) -> None:
     posts = PostQueue(tmp_path / "worker-posts.sqlite3")
@@ -539,7 +562,9 @@ def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
         now=100.0,
     )
     assert len(posts.claim("detector-a", now=105.0)) == 1
-    post_metrics = posts.metrics(window_seconds=60, now=105.0)
+    assert posts.metrics(window_seconds=60, now=105.0)["busy_workers"] == 1
+    assert posts.acknowledge(post.job_id, "detector-a", outcome="positive", now=108.0)
+    post_metrics = posts.metrics(window_seconds=60, now=108.0)
 
     labels = LabelQueue(tmp_path / "worker-labels.sqlite3")
     label = LabelJob.create(
@@ -547,16 +572,22 @@ def test_queue_metrics_report_busy_workers_and_recent_claim_wait(
         post_cid=post.post_cid,
         label_value="spoiler",
         detector_version="test-v1",
+        detected_at=199.0,
+        pipeline_started_at=190.0,
     )
     assert labels.enqueue(label, now=200.0)
     assert len(labels.claim("publisher-a", now=203.0)) == 1
-    label_metrics = labels.metrics(window_seconds=60, now=203.0)
+    assert labels.metrics(window_seconds=60, now=203.0)["busy_workers"] == 1
+    assert labels.acknowledge(label.job_id, "publisher-a", now=209.0)
+    label_metrics = labels.metrics(window_seconds=60, now=209.0)
 
-    assert post_metrics["busy_workers"] == 1
+    assert post_metrics["busy_workers"] == 0
     assert post_metrics["average_queue_wait_seconds"] == 5.0
+    assert post_metrics["average_traversal_seconds"] == 8.0
     assert float(post_metrics["average_claim_seconds"]) >= 0
-    assert label_metrics["busy_workers"] == 1
+    assert label_metrics["busy_workers"] == 0
     assert label_metrics["average_queue_wait_seconds"] == 3.0
+    assert label_metrics["average_traversal_seconds"] == 19.0
     assert float(label_metrics["average_claim_seconds"]) >= 0
 
 
@@ -915,8 +946,11 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert 'id="detector-workers"' in index
     assert 'id="detector-shards"' in index
     assert 'id="publisher-workers"' in index
-    assert "average_queue_wait_seconds" in app
+    assert "average_traversal_seconds" in app
+    assert "average_queue_wait_seconds" not in app
     assert "average_claim_seconds" in app
+    assert 'id="detector-traversal"' in index
+    assert 'id="publisher-traversal"' in index
     assert 'id="detection-rate"' in index
     assert "rates.detection_per_second" in app
     assert "Detector throughput" in index
