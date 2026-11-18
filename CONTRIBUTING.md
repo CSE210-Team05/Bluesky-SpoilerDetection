@@ -99,8 +99,10 @@ Before submitting a pull request:
 4. Run the required checks:
 
    ```shell
-   python -m pylint coordinator.py Bluesky_interface label_publisher metrics spoiler_interface tests
-   python -m pytest -m "not e2e"
+   python -m pylint coordinator.py Bluesky_interface label_publisher metrics spoiler_interface benchmarks tests
+   python -m pytest -m "not e2e and not performance" --cov --cov-branch --cov-report=term-missing
+   python -m pytest tests/performance -m performance -rA
+   python -m mkdocs build --strict
    python -m playwright install chromium
    python -m pytest tests/e2e --browser chromium --tracing=retain-on-failure
    ```
@@ -109,8 +111,11 @@ Before submitting a pull request:
 6. Include a description of the changes made.
 7. Reference the relevant GitHub issue in the pull request.
 
-The GitHub Actions `Checks` workflow runs lint, unit/integration, and browser
-E2E jobs for every pull request. A Pylint finding is a check failure, not a
-warning.
+The GitHub Actions `Checks` workflow runs lint, coverage-enforced tests,
+documentation rendering, a throughput regression, and browser E2E jobs for
+every pull request. A Pylint finding, coverage regression, documentation
+warning, or throughput result below `config/performance.json` is a check
+failure, not a warning. Coverage reports, rendered documentation, browser
+traces, and performance profiles are retained as workflow artifacts.
 
 For additional details, refer to the [official specification](https://www.conventionalcommits.org/en/v1.0.0/).

@@ -27,10 +27,37 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
 markers = [
     "e2e: browser tests that exercise the complete local pipeline",
+    "performance: throughput regression tests for performance-critical paths",
 ]
+
+[tool.coverage.run]
+branch = true
+source = [
+    "Bluesky_interface",
+    "coordinator",
+    "label_publisher",
+    "metrics",
+    "spoiler_interface",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.html]
+directory = "coverage-html"
+
+[tool.coverage.xml]
+output = "coverage.xml"
 
 [tool.pylint.basic]
 # Follow normal Python naming while preserving the detector's required public API.
