@@ -772,6 +772,8 @@ def rectify_post_shards(database: str | Path, shard_count: int) -> list[Path]:
         and int(manifest.get("shard_count", 0)) == shard_count
         and not base.exists()
     ):
+        for path in active_paths:
+            PostQueue(path)
         active_parent = active_paths[0].parent
         for candidate in root.iterdir():
             if candidate.is_dir() and candidate != active_parent:

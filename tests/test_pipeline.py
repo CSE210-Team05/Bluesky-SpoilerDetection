@@ -145,6 +145,36 @@ def test_metrics_adapters_can_open_without_schema_writes(tmp_path: Path) -> None
     assert not label_database.exists()
 
 
+def test_rectification_upgrades_active_shards_before_read_only_metrics(
+    tmp_path: Path,
+) -> None:
+    post_database = tmp_path / "posts.sqlite3"
+    label_database = tmp_path / "labels.sqlite3"
+    post_paths = rectify_post_shards(post_database, 2)
+    label_paths = rectify_label_shards(label_database, 2)
+
+    for database in (*post_paths, *label_paths):
+        table = (
+            "post_metric_buckets"
+            if database in post_paths
+            else "label_metric_buckets"
+        )
+        with sqlite3.connect(database) as connection:
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN completed")
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN traversal_seconds")
+
+    assert rectify_post_shards(post_database, 2) == post_paths
+    assert rectify_label_shards(label_database, 2) == label_paths
+
+    post_metrics = ShardedPostQueue(post_paths, migrate=False).metrics()
+    label_metrics = ShardedLabelQueue(label_paths, migrate=False).metrics()
+
+    assert post_metrics["recent_completed"] == 0
+    assert post_metrics["average_traversal_seconds"] is None
+    assert label_metrics["recent_completed"] == 0
+    assert label_metrics["average_traversal_seconds"] is None
+
+
 def test_post_database_rectification_migrates_backlog_and_replaces_generation(
     tmp_path: Path,
 ) -> None:
