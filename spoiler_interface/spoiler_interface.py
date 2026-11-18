@@ -6,9 +6,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+import queue
 import sqlite3
+import threading
 import time
 from typing import Iterator
+
+from Bluesky_interface.post_fetcher_interface import ClaimedPost, PostQueue
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,3 +420,249 @@ class LabelQueue:
             detected_at=float(row["detected_at"]),
             detector_version=row["detector_version"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PostIdentifier:
+    """Opaque detector result ID containing the fields needed for a label."""
+
+    job_id: str
+    post_uri: str
+    post_cid: str
+
+
+@dataclass(frozen=True, slots=True)
+class SpoilerItem:
+    """The complete input contract exposed to spoiler-classification code."""
+
+    id: PostIdentifier
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Completion:
+    delivery: ClaimedPost
+    is_spoiler: bool | None
+    error: str | None
+    detected_at: float
+
+
+_STOP_WRITER = object()
+
+
+class SpoilerWorkerInterface:
+    """Worker-facing post source with an asynchronous durable result sink.
+
+    The detector sees only ``SpoilerItem`` values and submits an ID plus a
+    boolean. This adapter owns leases, retries, label writes, and source-post
+    acknowledgements. Positive results are always inserted into the label
+    queue before their source post is acknowledged.
+    """
+
+    def __init__(
+        self,
+        post_queue: PostQueue,
+        label_queue: LabelQueue,
+        worker_id: str,
+        *,
+        label_value: str,
+        detector_version: str,
+        lease_seconds: float = 60.0,
+        retry_delay_seconds: float = 5.0,
+        max_attempts: int = 5,
+        max_pending_writes: int = 100,
+    ):
+        if max_pending_writes < 1:
+            raise ValueError("max_pending_writes must be positive")
+        self.post_queue = post_queue
+        self.label_queue = label_queue
+        self.worker_id = worker_id
+        self.label_value = label_value
+        self.detector_version = detector_version
+        self.lease_seconds = lease_seconds
+        self.retry_delay_seconds = retry_delay_seconds
+        self.max_attempts = max_attempts
+        self.max_pending_writes = max_pending_writes
+        self._completions: queue.Queue[_Completion | object] = queue.Queue(
+            maxsize=max_pending_writes
+        )
+        self._inflight: dict[PostIdentifier, ClaimedPost] = {}
+        self._outstanding = 0
+        self._counts = {"positive": 0, "negative": 0, "failed": 0}
+        self._background_errors: list[BaseException] = []
+        self._lock = threading.Lock()
+        self._closed = False
+        self._writer = threading.Thread(
+            target=self._write_completions,
+            name=f"{worker_id}-result-writer",
+            daemon=True,
+        )
+        self._writer.start()
+
+    def __enter__(self) -> "SpoilerWorkerInterface":
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.close()
+
+    def _raise_background_error(self) -> None:
+        with self._lock:
+            error = self._background_errors[0] if self._background_errors else None
+        if error is not None:
+            raise RuntimeError("asynchronous result writer failed") from error
+
+    def get_items(self, *, limit: int = 1) -> list[SpoilerItem]:
+        """Atomically claim up to ``limit`` posts and expose logical inputs."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if self._closed:
+            raise RuntimeError("worker interface is closed")
+        self._raise_background_error()
+        with self._lock:
+            capacity = self.max_pending_writes - self._outstanding
+        if capacity <= 0:
+            return []
+
+        deliveries = self.post_queue.claim(
+            self.worker_id,
+            limit=min(limit, capacity),
+            lease_seconds=self.lease_seconds,
+        )
+        items: list[SpoilerItem] = []
+        with self._lock:
+            for delivery in deliveries:
+                identifier = PostIdentifier(
+                    job_id=delivery.job.job_id,
+                    post_uri=delivery.job.post_uri,
+                    post_cid=delivery.job.post_cid,
+                )
+                self._inflight[identifier] = delivery
+                self._outstanding += 1
+                items.append(SpoilerItem(id=identifier, text=delivery.job.text))
+        return items
+
+    def _take_delivery(self, identifier: PostIdentifier) -> ClaimedPost:
+        with self._lock:
+            try:
+                return self._inflight.pop(identifier)
+            except KeyError as error:
+                raise ValueError("result ID is not leased by this worker") from error
+
+    def submit_result(self, identifier: PostIdentifier, is_spoiler: bool) -> None:
+        """Queue a classification result without waiting for either database."""
+        if self._closed:
+            raise RuntimeError("worker interface is closed")
+        delivery = self._take_delivery(identifier)
+        self._completions.put(
+            _Completion(
+                delivery=delivery,
+                is_spoiler=bool(is_spoiler),
+                error=None,
+                detected_at=time.time(),
+            )
+        )
+
+    def submit_error(self, identifier: PostIdentifier, error: BaseException) -> None:
+        """Return a failed classification to the queue through the same sink."""
+        if self._closed:
+            raise RuntimeError("worker interface is closed")
+        delivery = self._take_delivery(identifier)
+        self._completions.put(
+            _Completion(
+                delivery=delivery,
+                is_spoiler=None,
+                error=f"{type(error).__name__}: {error}",
+                detected_at=time.time(),
+            )
+        )
+
+    def _retry(self, completion: _Completion, error: str) -> None:
+        self.post_queue.retry(
+            completion.delivery.job.job_id,
+            self.worker_id,
+            error,
+            delay_seconds=self.retry_delay_seconds,
+            max_attempts=self.max_attempts,
+        )
+
+    def _persist(self, completion: _Completion) -> str:
+        if completion.error is not None:
+            self._retry(completion, completion.error)
+            return "failed"
+
+        outcome = "positive" if completion.is_spoiler else "negative"
+        if completion.is_spoiler:
+            self.label_queue.enqueue(
+                LabelJob.create(
+                    post_uri=completion.delivery.job.post_uri,
+                    post_cid=completion.delivery.job.post_cid,
+                    label_value=self.label_value,
+                    detector_version=self.detector_version,
+                    detected_at=completion.detected_at,
+                )
+            )
+        acknowledged = self.post_queue.acknowledge(
+            completion.delivery.job.job_id,
+            self.worker_id,
+            outcome=outcome,
+        )
+        if not acknowledged:
+            raise RuntimeError("post lease was lost before acknowledgement")
+        return outcome
+
+    def _write_completions(self) -> None:
+        while True:
+            queued = self._completions.get()
+            if queued is _STOP_WRITER:
+                self._completions.task_done()
+                return
+            assert isinstance(queued, _Completion)
+            outcome = "failed"
+            try:
+                outcome = self._persist(queued)
+            except Exception as error:
+                try:
+                    self._retry(queued, f"{type(error).__name__}: {error}")
+                except Exception as retry_error:
+                    with self._lock:
+                        self._background_errors.append(retry_error)
+            finally:
+                with self._lock:
+                    self._counts[outcome] += 1
+                    self._outstanding -= 1
+                self._completions.task_done()
+
+    def flush(self) -> dict[str, int]:
+        """Wait until all submitted results are durable and return sink totals."""
+        self._completions.join()
+        self._raise_background_error()
+        with self._lock:
+            return dict(self._counts)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with self._lock:
+            abandoned = list(self._inflight.values())
+            self._inflight.clear()
+        for delivery in abandoned:
+            self._completions.put(
+                _Completion(
+                    delivery=delivery,
+                    is_spoiler=None,
+                    error="worker stopped before classification completed",
+                    detected_at=time.time(),
+                )
+            )
+
+        error: BaseException | None = None
+        try:
+            self.flush()
+        except BaseException as caught:
+            error = caught
+        self._completions.put(_STOP_WRITER)
+        self._completions.join()
+        self._writer.join()
+        if error is not None:
+            raise error

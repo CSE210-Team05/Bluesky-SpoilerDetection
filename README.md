@@ -151,6 +151,10 @@ python -m pytest
 
 - `Bluesky_interface` owns the post database and stream cursor.
 - `spoiler_interface` owns the label database.
+- Detector workers receive logical items from `SpoilerWorkerInterface`; the
+  pure `isSpoiler` function has no database or transaction knowledge.
+- Label results are written through a bounded asynchronous sink, with positive
+  source jobs acknowledged only after their label is durable.
 - Worker leases expire and are redelivered after crashes.
 - Queue IDs and label IDs are deterministic, making repeated queue insertion
   idempotent. A live publishing client must also use the job ID as its

@@ -1,7 +1,8 @@
-"""Spoiler detector and queue worker.
+"""Pure spoiler classification and its thin worker loop.
 
-The keyword detector is intentionally replaceable.  It provides a runnable
-first pass while preserving the worker and queue contracts for a later model.
+Database transactions, leases, retries, and result writes belong to the
+enclosing spoiler interface. Classification receives a logical item and
+returns only its ID and the spoiler decision.
 """
 
 from __future__ import annotations
@@ -11,12 +12,18 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import signal
 import socket
 import time
-from typing import Any, Iterable
+from typing import Iterable
 
 from Bluesky_interface.post_fetcher_interface import PostQueue
-from spoiler_interface.spoiler_interface import LabelJob, LabelQueue
+from spoiler_interface.spoiler_interface import (
+    LabelQueue,
+    PostIdentifier,
+    SpoilerItem,
+    SpoilerWorkerInterface,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,58 +70,34 @@ def load_detector(path: str | Path) -> KeywordSpoilerDetector:
     )
 
 
-def process_once(
-    post_queue: PostQueue,
-    label_queue: LabelQueue,
+def isSpoiler(
+    item: SpoilerItem,
     detector: KeywordSpoilerDetector,
-    worker_id: str,
+) -> tuple[PostIdentifier, bool]:
+    """Classify one item without knowing anything about queue transactions."""
+    return item.id, detector.detect(item.text).is_spoiler
+
+
+def process_once(
+    worker_interface: SpoilerWorkerInterface,
+    detector: KeywordSpoilerDetector,
     *,
     batch_size: int = 10,
-    lease_seconds: float = 60.0,
-    retry_delay_seconds: float = 5.0,
-    max_attempts: int = 5,
 ) -> dict[str, int]:
-    claimed = post_queue.claim(
-        worker_id,
-        limit=batch_size,
-        lease_seconds=lease_seconds,
-    )
-    counts = {"claimed": len(claimed), "positive": 0, "negative": 0, "failed": 0}
-    for delivery in claimed:
+    items = worker_interface.get_items(limit=batch_size)
+    counts = {"claimed": len(items), "positive": 0, "negative": 0, "failed": 0}
+    for item in items:
         try:
-            result = detector.detect(delivery.job.text)
-            if result.is_spoiler:
-                label_queue.enqueue(
-                    LabelJob.create(
-                        post_uri=delivery.job.post_uri,
-                        post_cid=delivery.job.post_cid,
-                        label_value=detector.label_value,
-                        detector_version=detector.version,
-                    )
-                )
-                if not post_queue.acknowledge(
-                    delivery.job.job_id,
-                    worker_id,
-                    outcome="positive",
-                ):
-                    raise RuntimeError("post lease was lost before acknowledgement")
+            identifier, result = isSpoiler(item, detector)
+            if identifier != item.id:
+                raise ValueError("detector returned an ID different from its input")
+            worker_interface.submit_result(identifier, result)
+            if result:
                 counts["positive"] += 1
             else:
-                if not post_queue.acknowledge(
-                    delivery.job.job_id,
-                    worker_id,
-                    outcome="negative",
-                ):
-                    raise RuntimeError("post lease was lost before acknowledgement")
                 counts["negative"] += 1
         except Exception as error:
-            post_queue.retry(
-                delivery.job.job_id,
-                worker_id,
-                str(error),
-                delay_seconds=retry_delay_seconds,
-                max_attempts=max_attempts,
-            )
+            worker_interface.submit_error(item.id, error)
             counts["failed"] += 1
     return counts
 
@@ -126,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config/spoiler_tags.json"))
     parser.add_argument("--worker-id", default=f"detector-{socket.gethostname()}")
     parser.add_argument("--batch-size", type=int, default=10)
+    parser.add_argument("--write-buffer-size", type=int, default=100)
     parser.add_argument("--poll-seconds", type=float, default=0.5)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
@@ -133,19 +117,44 @@ def main(argv: list[str] | None = None) -> int:
     post_queue = PostQueue(args.post_database)
     label_queue = LabelQueue(args.label_database)
     detector = load_detector(args.config)
-    while True:
-        counts = process_once(
+    stop_requested = False
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    stop_signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        stop_signals.append(signal.SIGBREAK)
+    previous_handlers = {
+        signum: signal.signal(signum, request_stop) for signum in stop_signals
+    }
+    try:
+        with SpoilerWorkerInterface(
             post_queue,
             label_queue,
-            detector,
             args.worker_id,
-            batch_size=args.batch_size,
-        )
-        if args.once:
-            print(json.dumps(counts))
-            return 0
-        if counts["claimed"] == 0:
-            time.sleep(args.poll_seconds)
+            label_value=detector.label_value,
+            detector_version=detector.version,
+            max_pending_writes=args.write_buffer_size,
+        ) as worker_interface:
+            while not stop_requested:
+                counts = process_once(
+                    worker_interface,
+                    detector,
+                    batch_size=args.batch_size,
+                )
+                if args.once:
+                    persisted = worker_interface.flush()
+                    counts.update(persisted)
+                    print(json.dumps(counts))
+                    return 0
+                if counts["claimed"] == 0:
+                    time.sleep(args.poll_seconds)
+        return 0
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

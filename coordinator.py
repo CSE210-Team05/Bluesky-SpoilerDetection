@@ -149,6 +149,8 @@ def build_component_specs(
                     f"detector-{index + 1}",
                     "--batch-size",
                     str(detectors.get("batch_size", 10)),
+                    "--write-buffer-size",
+                    str(detectors.get("write_buffer_size", 100)),
                     "--poll-seconds",
                     str(detectors.get("poll_seconds", 0.5)),
                 ),

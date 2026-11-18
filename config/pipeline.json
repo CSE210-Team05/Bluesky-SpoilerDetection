@@ -7,7 +7,8 @@
     "batch_size": 10,
     "poll_seconds": 0.5,
     "tag_config": "config/spoiler_tags.json",
-    "workers": 2
+    "write_buffer_size": 100,
+    "workers": 5
   },
   "metrics": {
     "allowed_origin": "https://cse210-team05.github.io",

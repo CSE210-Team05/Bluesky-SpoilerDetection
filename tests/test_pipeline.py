@@ -5,6 +5,7 @@ import json
 from io import BytesIO
 from pathlib import Path
 import sqlite3
+import threading
 
 import pytest
 
@@ -26,9 +27,14 @@ from metrics.gateway import (
 from metrics.snapshot import build_snapshot
 from spoiler_interface.spoiler_core.spoiler_detector import (
     KeywordSpoilerDetector,
+    isSpoiler,
     process_once as detect_once,
 )
-from spoiler_interface.spoiler_interface import LabelJob, LabelQueue
+from spoiler_interface.spoiler_interface import (
+    LabelJob,
+    LabelQueue,
+    SpoilerWorkerInterface,
+)
 
 
 def post_job(sequence: int = 1, text: str = "This contains a spoiler") -> PostJob:
@@ -159,14 +165,27 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
     posts.enqueue_and_checkpoint([positive], stream_id="test-stream", sequence=1)
     posts.enqueue_and_checkpoint([negative], stream_id="test-stream", sequence=2)
 
-    result = detect_once(posts, labels, detector, "detector-a", batch_size=10)
+    with SpoilerWorkerInterface(
+        posts,
+        labels,
+        "detector-a",
+        label_value=detector.label_value,
+        detector_version=detector.version,
+    ) as worker_interface:
+        result = detect_once(worker_interface, detector, batch_size=10)
+        persisted = worker_interface.flush()
+
     assert result == {"claimed": 2, "positive": 2, "negative": 0, "failed": 0}
+    assert persisted == {"positive": 2, "negative": 0, "failed": 0}
     assert posts.metrics()["available"] == 0
 
     claimed = labels.claim("publisher-a", limit=10)
     assert len(claimed) == 2
-    assert claimed[0].job.post_cid == positive.post_cid
-    assert claimed[0].job.label_value == "spoiler"
+    assert {delivery.job.post_cid for delivery in claimed} == {
+        positive.post_cid,
+        negative.post_cid,
+    }
+    assert {delivery.job.label_value for delivery in claimed} == {"spoiler"}
 
     duplicate = LabelJob.create(
         post_uri=positive.post_uri,
@@ -175,6 +194,70 @@ def test_detector_handoff_is_idempotent(tmp_path: Path) -> None:
         detector_version="different-version",
     )
     assert not labels.enqueue(duplicate)
+
+
+def test_detector_function_returns_only_id_and_decision(tmp_path: Path) -> None:
+    posts = PostQueue(tmp_path / "posts.sqlite3")
+    labels = LabelQueue(tmp_path / "labels.sqlite3")
+    detector = KeywordSpoilerDetector(["spoiler"])
+    job = post_job()
+    posts.enqueue_and_checkpoint([job], stream_id="test-stream", sequence=1)
+
+    with SpoilerWorkerInterface(
+        posts,
+        labels,
+        "detector-a",
+        label_value=detector.label_value,
+        detector_version=detector.version,
+    ) as worker_interface:
+        item = worker_interface.get_items()[0]
+        identifier, decision = isSpoiler(item, detector)
+        worker_interface.submit_result(identifier, decision)
+
+    assert identifier == item.id
+    assert decision is True
+
+
+def test_label_write_does_not_block_classification_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posts = PostQueue(tmp_path / "posts.sqlite3")
+    labels = LabelQueue(tmp_path / "labels.sqlite3")
+    job = post_job()
+    posts.enqueue_and_checkpoint([job], stream_id="test-stream", sequence=1)
+    write_started = threading.Event()
+    allow_write = threading.Event()
+    enqueue = labels.enqueue
+
+    def slow_enqueue(label: LabelJob, *, now: float | None = None) -> bool:
+        write_started.set()
+        assert allow_write.wait(timeout=2)
+        return enqueue(label, now=now)
+
+    monkeypatch.setattr(labels, "enqueue", slow_enqueue)
+    with SpoilerWorkerInterface(
+        posts,
+        labels,
+        "detector-a",
+        label_value="spoiler",
+        detector_version="test-v1",
+    ) as worker_interface:
+        item = worker_interface.get_items()[0]
+        worker_interface.submit_result(item.id, True)
+        try:
+            assert write_started.wait(timeout=1)
+            assert posts.metrics()["leased"] == 1
+        finally:
+            allow_write.set()
+        assert worker_interface.flush() == {
+            "positive": 1,
+            "negative": 0,
+            "failed": 0,
+        }
+
+    assert posts.metrics()["available"] == 0
+    assert labels.metrics()["available"] == 1
 
 
 class RecordingClient:
@@ -413,6 +496,7 @@ def test_coordinator_builds_complete_process_group(tmp_path: Path) -> None:
     assert not specs[-1].restart
     assert str(source) in specs[-1].command
     assert "--dry-run" in specs[-2].command
+    assert specs[1].command[specs[1].command.index("--write-buffer-size") + 1] == "100"
     assert load_supervision_settings(config).max_restarts == 5
 
 

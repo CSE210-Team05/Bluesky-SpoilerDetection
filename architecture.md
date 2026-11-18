@@ -169,15 +169,23 @@ queued.
 `spoiler_interface/spoiler_interface.py` is the only public boundary for
 spoiler detection and its results. It is responsible for:
 
-- consuming post jobs from the post queue;
-- supplying each post to the spoiler detector core;
-- acknowledging posts that have been successfully classified; and
-- placing positive results onto the durable label queue.
+- atomically claiming post jobs and exposing them as logical detector inputs;
+- tracking source leases without exposing transactions to detector code;
+- asynchronously writing positive results to the durable label queue; and
+- acknowledging or retrying source posts after each asynchronous write.
+
+The interface is a library instantiated inside every detector worker, not a
+load balancer or separately deployed service. Each worker has an independent
+adapter and asynchronous result writer. SQLite arbitrates competing claims.
 
 `spoiler_interface/spoiler_core/spoiler_detector.py` contains the detection
-logic. Multiple detector worker processes may consume from the post queue in
-parallel. A negative result is acknowledged and discarded. A positive result
-is acknowledged only after its label job has been durably enqueued.
+logic as `isSpoiler(item) -> (id, bool)`. It has no queue, transaction, retry,
+or label-database responsibilities. Multiple detector worker processes may
+classify in parallel. Their bounded in-process result buffers let
+classification continue while a background writer performs database I/O. A
+negative result is acknowledged and discarded. A positive result is
+acknowledged only after its label job has been durably enqueued. A full result
+buffer applies backpressure instead of allowing unbounded memory or leases.
 
 The first-pass implementation runs in throughput mode: detection returns
 positive immediately for every post so queue and publisher capacity can be
