@@ -6,7 +6,7 @@
       "spoiler"
     ]
   },
-  "generated_at": "2026-11-18T00:53:27.795886+00:00",
+  "generated_at": "2026-11-18T01:09:15.264023+00:00",
   "queues": {
     "labels": {
       "available": 0,
@@ -22,27 +22,27 @@
     }
   },
   "rates": {
-    "detection_per_second": 38.59,
-    "ingestion_per_second": 38.59,
-    "label_per_second": 38.59,
-    "publish_per_second": 38.59
+    "detection_per_second": 0.0,
+    "ingestion_per_second": 0.0,
+    "label_per_second": 0.0,
+    "publish_per_second": 0.0
   },
   "stream": {
     "connected": true,
     "id": "jetstream2-us-west-posts-v1",
     "invalid_total": 0,
-    "last_event_age_seconds": 9.638131141662598,
-    "received_total": 816889,
-    "reconnect_total": 14
+    "last_event_age_seconds": 844.3699913024902,
+    "received_total": 827869,
+    "reconnect_total": 15
   },
   "totals": {
     "dead_lettered": 0,
-    "detected": 770279,
+    "detected": 780489,
     "detection_retries": 0,
-    "ingested": 770279,
-    "labels_enqueued": 41813,
+    "ingested": 780489,
+    "labels_enqueued": 52023,
     "publication_retries": 0,
-    "published": 41813
+    "published": 52023
   },
   "window_seconds": 300
 }
