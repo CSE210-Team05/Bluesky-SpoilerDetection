@@ -36,7 +36,7 @@ INVALID_KEY_VALUE = "INVALID_PAT"
 
 API_VERSION = "2022-11-28"
 # Replce INVALID_KEY_VALUE with the key found in demo-values in slack
-DEMO_GITHUB_TOKEN = "REVOKED_GITHUB_TOKEN"
+DEMO_GITHUB_TOKEN = INVALID_KEY_VALUE
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
