@@ -6,7 +6,7 @@
       "spoiler"
     ]
   },
-  "generated_at": "2026-11-17T00:00:00+00:00",
+  "generated_at": "2026-11-18T00:06:19.523847+00:00",
   "queues": {
     "labels": {
       "available": 0,
@@ -29,20 +29,20 @@
   },
   "stream": {
     "connected": false,
-    "id": null,
+    "id": "jetstream2-us-west-posts-v1",
     "invalid_total": 0,
-    "last_event_age_seconds": null,
-    "received_total": 0,
-    "reconnect_total": 0
+    "last_event_age_seconds": 14237.981768846512,
+    "received_total": 34,
+    "reconnect_total": 1
   },
   "totals": {
     "dead_lettered": 0,
-    "detected": 0,
+    "detected": 32,
     "detection_retries": 0,
-    "ingested": 0,
+    "ingested": 32,
     "labels_enqueued": 0,
     "publication_retries": 0,
     "published": 0
   },
-  "window_seconds": 60
+  "window_seconds": 300
 }
