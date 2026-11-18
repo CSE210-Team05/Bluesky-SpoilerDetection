@@ -1,12 +1,11 @@
 const byId = (id) => document.getElementById(id);
-const endpointRegistry = "https://raw.githubusercontent.com/CSE210-Team05/Bluesky-SpoilerDetection/live-metrics-endpoint-registry/docs/metrics-endpoint.json";
+const metricsSource = "/metrics";
 const svgNamespace = "http://www.w3.org/2000/svg";
 const historyLimit = 60;
 const history = { ingestion: [], label: [], publish: [] };
 const requestTimeoutMilliseconds = 2_500;
 const staleWarningSeconds = 4;
 const staleErrorSeconds = 15;
-let metricsSource = null;
 let refreshInFlight = false;
 let lastSuccessfulAt = null;
 let lastConnectionError = null;
@@ -27,6 +26,14 @@ function formatLag(seconds) {
   if (seconds < 1) return "<1s";
   if (seconds < 60) return `${Math.round(seconds)}s`;
   return `${(seconds / 60).toFixed(1)}m`;
+}
+
+function formatDuration(seconds) {
+  if (seconds == null) return "No recent claims";
+  const value = Number(seconds);
+  if (value < 0.001) return "<1ms";
+  if (value < 1) return `${(value * 1_000).toFixed(value < 0.01 ? 2 : 1)}ms`;
+  return `${value.toFixed(value < 10 ? 2 : 1)}s`;
 }
 
 function addSample(bucket, value) {
@@ -107,6 +114,25 @@ function renderBottleneck(postState, labelState) {
   } else {
     badge.textContent = "Within target";
   }
+}
+
+function renderWorkerPool(prefix, pool) {
+  const configured = Number(pool.configured || 0);
+  const busy = Number(pool.busy || 0);
+  const utilization = Number(pool.utilization_percent || 0);
+  byId(`${prefix}-workers`).textContent = `${formatInteger(busy)} / ${formatInteger(configured)} busy`;
+  byId(`${prefix}-utilization`).textContent = `${utilization.toFixed(0)}%`;
+  const shards = byId(`${prefix}-shards`);
+  if (shards) shards.textContent = formatInteger(pool.shards || 0);
+  byId(`${prefix}-queue-wait`).textContent = formatDuration(pool.average_queue_wait_seconds);
+  byId(`${prefix}-db-wait`).textContent = formatDuration(pool.average_claim_seconds);
+  byId(`${prefix}-worker-fill`).style.width = `${Math.min(100, utilization)}%`;
+}
+
+function renderWorkers(workers) {
+  renderWorkerPool("detector", workers.detectors || {});
+  renderWorkerPool("publisher", workers.publishers || {});
+  byId("worker-window").textContent = `${formatInteger(workers.window_seconds || 0)}s window`;
 }
 
 function renderHealth(stream, generated, queues) {
@@ -227,6 +253,7 @@ function render(data) {
 
   renderConfiguration(data.configuration);
   renderTotals(data.totals);
+  renderWorkers(data.workers || {});
   renderHealth(data.stream || {}, new Date(data.generated_at), data.queues);
   byId("error").hidden = true;
 }
@@ -277,25 +304,12 @@ async function refresh() {
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    if (metricsSource === null) {
-      const registryResponse = await fetchWithTimeout(`${endpointRegistry}?t=${Date.now()}`);
-      if (!registryResponse.ok) {
-        throw new Error(`endpoint registry returned ${registryResponse.status}`);
-      }
-      const endpoint = await registryResponse.json();
-      if (endpoint.state !== "active" || !endpoint.public_url) {
-        throw new Error("the coordinator has not opened the live metrics endpoint yet");
-      }
-      metricsSource = `${endpoint.public_url.replace(/\/$/, "")}/metrics`;
-    }
-
     const metricsResponse = await fetchWithTimeout(`${metricsSource}?t=${Date.now()}`);
     if (!metricsResponse.ok) {
       throw new Error(`metrics request returned ${metricsResponse.status}`);
     }
     render(await metricsResponse.json());
   } catch (error) {
-    metricsSource = null;
     showConnectionError(error);
   } finally {
     refreshInFlight = false;

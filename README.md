@@ -22,9 +22,6 @@ Install the Python package and all development/test dependencies:
 python -m pip install -r requirements.txt
 ```
 
-The live metrics tunnel also uses the external `cloudflared` executable; see
-the platform-specific installation note below.
-
 Create a sample event:
 
 ```json
@@ -63,61 +60,75 @@ temporary dry-run publisher setting live in `config/pipeline.json`. Stop the
 whole process group with `Ctrl-C`; individual failed workers are restarted up
 to the configured limit.
 
-Configure GitHub Pages to publish from `docs/`. The dashboard remains a static
-site, but its JavaScript discovers the active coordinator and reads live
-snapshots from its metrics gateway once per second. The coordinator binds a
-loopback-only HTTP server, starts an outbound Cloudflare Quick Tunnel, and
-registers that temporary HTTPS URL on the `live-metrics-endpoint-registry`
-branch. Metric
-values are never committed to GitHub and do not cause Pages deployments.
+## Local metrics dashboard
 
-Install `cloudflared` once on each machine that may run the coordinator. On
-macOS with Homebrew:
+The dashboard is deliberately local for now. The coordinator serves the page
+and its live JSON data from the same loopback-only HTTP server; it does not use
+GitHub Pages, a GitHub token, or a Cloudflare tunnel.
 
-```shell
-brew install cloudflared
-```
+Start the coordinator, then open:
 
-Quick Tunnels require no Cloudflare account, public IP address, router port
-forward, or inbound firewall rule. The coordinator owns the tunnel process and
-closes it during shutdown.
+<http://127.0.0.1:8765/>
 
-The repository includes `.github/workflows/deploy-pages.yml`. It validates and
-deploys `docs/` only when frontend files change on `main`; metrics-only commits
-do not trigger a deployment. In the repository's **Settings → Pages**, select
-**GitHub Actions** as the publishing source. You can validate the artifact
-locally before pushing:
+Once the metrics gateway is ready, the coordinator attempts to open that URL
+in the default browser. If no browser can be opened, it prints the same URL so
+it can be opened manually. Set `metrics.open_browser` to `false` for automated
+or headless environments.
 
-```shell
-bash scripts/prepare-pages.sh
-```
+The browser polls `/metrics` once per second on that same origin. The dashboard
+is reachable only from the machine running the coordinator. Do not open
+`docs/index.html` directly from disk: the coordinator is the web server and the
+metrics source.
 
-If the published site displays this repository README, GitHub Pages is still
-using **Deploy from a branch** and publishing the repository root. Change the
-Pages source to **GitHub Actions**. A root `index.html` redirect is included as
-a fallback, but the Actions source is the intended deployment mode.
-
-For this demo, the fine-grained GitHub token is embedded directly in the
-metrics gateway. The repository, endpoint registry, local port, allowed
-browser origin, and rate window are configured in `config/pipeline.json`:
+The local directory, bind address, port, and rate window are configured in
+`config/pipeline.json`:
 
 ```json
 "metrics": {
-  "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
-  "registry_branch": "live-metrics-endpoint-registry",
-  "registry_path": "docs/metrics-endpoint.json",
+  "dashboard_directory": "docs",
   "host": "127.0.0.1",
   "port": 8765,
+  "open_browser": true,
   "live_rate_window_seconds": 10,
-  "caught_up_lag_seconds": 10,
-  "allowed_origin": "https://cse210-team05.github.io"
+  "caught_up_lag_seconds": 10
 }
 ```
+
+Queue sharding is controlled beside the database paths:
+
+```json
+"databases": {
+  "posts": "data/posts.sqlite3",
+  "post_shards": 4,
+  "labels": "data/labels.sqlite3",
+  "label_shards": 4
+}
+```
+
+At every coordinator startup, database rectification treats the configured
+shard counts as authoritative. If a legacy database exists, or a shard count
+changed, the coordinator creates a complete new generation and redistributes
+the current backlog by deterministic job ID. Post rectification preserves
+cursors and stream health; label rectification preserves the published-label
+history used for idempotency. Both preserve aggregate metrics and reset
+abandoned leases to pending. The coordinator atomically switches each shard
+manifest only after its complete copy succeeds, then deletes the legacy
+database or previous shard generation. A failed copy leaves the prior
+generation authoritative. Every post shard must have a detector worker and
+every label shard must have a publisher worker.
 
 Dashboard throughput uses counter deltas over a short ten-second in-memory
 window. The persistent five-minute SQLite buckets remain available for coarse
 history, but no longer make the live display take minutes to reflect recovery
 or a change in incoming demand.
+
+The **Worker pools** panel shows busy versus configured detector and publisher
+workers, utilization, average queue wait for recently claimed jobs, and average
+SQLite claim time. The configured count confirms which worker setting the
+coordinator actually started. High utilization plus rising queue wait indicates
+insufficient processing capacity; rising SQLite claim time as workers are added
+indicates database contention instead of useful parallelism. Idle workers show
+as configured but not busy, so low utilization with no backlog is normal.
 
 The gateway computes aggregate snapshots on a background sampler. Dashboard
 requests read only the last completed in-memory snapshot, so a browser never
@@ -134,20 +145,29 @@ If the WebSocket remains open but delivers no events for 30 seconds, the reader
 forces a reconnect from its durable cursor on the next configured Jetstream
 instance instead of remaining silently stuck on one unhealthy host.
 
-The OS socket bind rejects a second gateway on the same host. A SHA-guarded
-registry lease rejects a coordinator from another installation if one is
-already active. The local installation ID is stored beside the post database,
-so this installation automatically reclaims its own lease after an ungraceful
-exit. After upgrading from a version that used a new random ID on every run,
-verify the old process has stopped and use
-`python coordinator.py --force-metrics-lease` once to replace that legacy
-lease.
+The OS socket bind rejects a second gateway on the same host and port. This is
+the only exclusivity mechanism needed while the dashboard is local-only. A
+cleanly stopped gateway permits the address to be reused immediately, so the
+coordinator can be restarted without waiting for TCP connections to expire.
 
 ## Test
 
+Install the development dependencies, then run the same three checks used by
+GitHub Actions:
+
 ```shell
-python -m pytest
+python -m pylint coordinator.py Bluesky_interface label_publisher metrics spoiler_interface tests
+python -m pytest -m "not e2e"
+python -m playwright install chromium
+python -m pytest tests/e2e --browser chromium --tracing=retain-on-failure
 ```
+
+The E2E test launches the real coordinator with a temporary replay stream and
+uses Chromium to verify that an event reaches the rendered dashboard after
+ingestion, detection, and dry-run publication. The `Checks` workflow runs lint,
+unit/integration tests on Python 3.11 and 3.13, and Chromium E2E as separate
+jobs. Any Pylint finding enabled in `pyproject.toml` returns a nonzero status and
+fails the lint job.
 
 ## Current boundaries
 
@@ -162,6 +182,11 @@ python -m pytest
   idempotent. A live publishing client must also use the job ID as its
   idempotency key where the labeling service supports one.
 - The SQLite databases must live on a local disk, not a network filesystem.
+- The post queue is deterministically sharded according to
+  `databases.post_shards`; changing the count triggers startup rectification.
+- The label queue is deterministically sharded according to
+  `databases.label_shards`; changing the count rectifies its backlog and
+  published-label history before publishers start.
 - The detector is currently in throughput mode and returns positive immediately
   for every post. The keyword implementation remains present but bypassed.
 - Live Bluesky label publication remains an explicit integration task.

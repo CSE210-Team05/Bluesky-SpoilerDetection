@@ -10,7 +10,12 @@ import sys
 from typing import Any, Iterable, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from Bluesky_interface.post_fetcher_interface import POST_COLLECTION, PostJob, PostQueue
+from Bluesky_interface.post_fetcher_interface import (
+    POST_COLLECTION,
+    PostJob,
+    PostQueue,
+    ShardedPostQueue,
+)
 
 
 def parse_jetstream_event(event: dict[str, Any], stream_id: str) -> tuple[int, list[PostJob]]:
@@ -54,7 +59,7 @@ def parse_jetstream_event(event: dict[str, Any], stream_id: str) -> tuple[int, l
 
 
 class PostReader:
-    def __init__(self, queue: PostQueue, stream_id: str):
+    def __init__(self, queue: PostQueue | ShardedPostQueue, stream_id: str):
         self.queue = queue
         self.stream_id = stream_id
 
@@ -240,7 +245,7 @@ def json_line_events(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read Jetstream JSON Lines into the post queue")
-    parser.add_argument("--database", type=Path, default=Path("data/posts.sqlite3"))
+    parser.add_argument("--database", type=Path, action="append")
     parser.add_argument("--stream-id", default="jetstream-jsonl")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--input", type=Path, help="development JSON Lines replay file")
@@ -258,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-message-bytes", type=int, default=4 * 1024 * 1024)
     args = parser.parse_args(argv)
 
-    queue = PostQueue(args.database)
+    databases = args.database or [Path("data/posts.sqlite3")]
+    queue = ShardedPostQueue(databases)
     reader = PostReader(queue, args.stream_id)
     if args.endpoint:
         result = asyncio.run(

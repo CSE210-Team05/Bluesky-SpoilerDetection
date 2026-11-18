@@ -19,8 +19,8 @@ from typing import Iterable
 
 from Bluesky_interface.post_fetcher_interface import PostQueue
 from spoiler_interface.spoiler_interface import (
-    LabelQueue,
     PostIdentifier,
+    ShardedLabelQueue,
     SpoilerItem,
     SpoilerWorkerInterface,
 )
@@ -105,7 +105,7 @@ def process_once(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a spoiler detector worker")
     parser.add_argument("--post-database", type=Path, default=Path("data/posts.sqlite3"))
-    parser.add_argument("--label-database", type=Path, default=Path("data/labels.sqlite3"))
+    parser.add_argument("--label-database", type=Path, action="append")
     parser.add_argument("--config", type=Path, default=Path("config/spoiler_tags.json"))
     parser.add_argument("--worker-id", default=f"detector-{socket.gethostname()}")
     parser.add_argument("--batch-size", type=int, default=10)
@@ -115,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     post_queue = PostQueue(args.post_database)
-    label_queue = LabelQueue(args.label_database)
+    label_databases = args.label_database or [Path("data/labels.sqlite3")]
+    label_queue = ShardedLabelQueue(label_databases)
     detector = load_detector(args.config)
     stop_requested = False
 

@@ -2,5 +2,7 @@
 # pyproject.toml. Editable mode also keeps local source changes immediately active.
 -e .
 
-# Test dependency used by tests/test_pipeline.py.
+# Test, browser E2E, and lint dependencies used by local and CI checks.
 pytest>=8,<10
+pytest-playwright>=0.10,<1
+pylint>=4.1,<5

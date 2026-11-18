@@ -38,25 +38,19 @@ Label queue
         v
 Bluesky labeling service
 
-Pipeline machine              Runtime registry          GitHub Pages
-----------------              ----------------          ------------
-Metrics HTTP gateway --register tunnel URL--> endpoint.json
-        ^                                                   |
-        `------------- live HTTPS polling ------------------'
+Pipeline machine
+----------------
+Local dashboard --same-origin HTTP--> metrics gateway --read--> snapshots
 ```
 
-Square brackets denote a horizontally scalable worker pool. The detector pool
-is expected to scale with demand. A single publisher may be sufficient at
-first; more publishers can consume from the same queue if publishing becomes a
-bottleneck.
+Square brackets denote horizontally scalable worker pools. Detector and
+publisher workers are distributed across their respective SQLite queue shards.
 
-Each pipeline stage also reports operational metrics. A lightweight, static
-GitHub Pages dashboard displays the current spoiler tags and pipeline health so
-bottlenecks can be identified without accessing the worker processes directly.
-The dashboard and pipeline run on separate machines. The deployed dashboard
-discovers a coordinator-managed outbound tunnel and polls its aggregate metrics
-without requiring a Pages redeployment. SQLite databases and pipeline control
-operations remain private to the pipeline host.
+Each pipeline stage also reports operational metrics. A lightweight local
+dashboard displays the current spoiler tags and pipeline health so bottlenecks
+can be identified without accessing worker processes directly. The coordinator
+serves both the static dashboard and aggregate metrics from one loopback-only
+origin. SQLite databases and pipeline control operations remain private.
 
 ## Directory Structure
 
@@ -85,8 +79,7 @@ operations remain private to the pipeline host.
 `-- docs/
     |-- index.html
     |-- app.js
-    |-- styles.css
-    `-- metrics-endpoint.json
+    `-- styles.css
 ```
 
 The `*_core` directories are private implementation areas. Code outside an
@@ -101,9 +94,9 @@ reads `config/pipeline.json` and starts the reader, configured detector pool,
 configured publisher pool, and metrics gateway as independent child
 processes.
 
-The coordinator starts the metrics gateway first and waits for it to acquire
-the exclusive lease and publish a working tunnel before starting any pipeline
-worker. It monitors all child processes, restarts failed detector and publisher
+The coordinator starts the metrics gateway first and waits for its initial
+snapshot before starting any pipeline worker. It monitors all child processes,
+restarts failed detector and publisher
 processes up to a configured limit, and shuts every component down together on
 `SIGINT` or `SIGTERM`. The gateway and reader are critical singletons: if
 either stops, the entire pipeline stops rather than silently starting a
@@ -160,11 +153,21 @@ than ingestion.
 Jobs remain available until acknowledged so detector workers can be restarted
 or scaled without losing accepted posts.
 
-The initial implementation uses a local SQLite database owned by the Bluesky
-interface. The interface owns its schema, migrations, and queue operations;
-other components must not issue SQL against it directly. The reader and
-detector processes use the interface adapter, with each process maintaining its
-own short-lived or pooled SQLite connection.
+The implementation uses a configurable set of local SQLite shards owned by the
+Bluesky interface. The interface owns their schemas, migrations, routing, and
+queue operations; other components must not issue SQL against them directly.
+The reader routes each job by a stable hash of its deterministic job ID.
+Detector workers are assigned across shards, with at least one detector per
+shard, so independent shards can sustain concurrent SQLite writers.
+
+Before any worker starts, the coordinator rectifies the on-disk layout to the
+configured shard count. It copies active and dead jobs, aggregate counters,
+metric buckets, stream cursor, and stream health into a new generation. Leases
+from the stopped generation become pending work. A manifest switch makes the
+new generation authoritative only after every shard commits successfully;
+legacy files and the previous generation are deleted afterward. Changing the
+configured count therefore reshards the existing backlog before processing
+continues rather than creating an empty parallel queue.
 
 SQLite runs in WAL mode on a local disk. Queue operations use short
 transactions, a busy timeout, indexed job states, and expiring worker leases.
@@ -209,10 +212,18 @@ The label queue contains only posts classified as spoilers. Each job includes,
 at minimum, the post's AT URI, its CID, and the spoiler label value. It buffers
 publisher outages or rate limits without blocking ingestion or detection.
 
-The initial implementation uses a second local SQLite database owned by the
-spoiler interface. The spoiler interface owns its schema, migrations, and queue
-operations. Publishers access it only through that interface, using independent
-SQLite connections and short lease-based transactions.
+The implementation uses a configurable set of local SQLite shards owned by the
+spoiler interface. The interface owns their schemas, migrations, deterministic
+routing, and queue operations. Each publisher is assigned to one shard, with at
+least one publisher per shard, while detector output is routed by the stable
+hash of the deterministic label job ID.
+
+Before workers start, the coordinator rectifies this queue to
+`databases.label_shards` using the same generation-and-manifest process as the
+post queue. Rectification redistributes active and dead jobs, resets abandoned
+leases, and preserves aggregate metrics and `published_labels` idempotency
+history. The old database or generation is deleted only after the new manifest
+becomes authoritative.
 
 The two queue databases intentionally have separate owners. A detector cannot
 atomically commit across both databases, so a positive result is handed off in
@@ -229,9 +240,10 @@ result. Negative results require only acknowledgement of the post job.
 ### Label Publisher
 
 `label_publisher/publisher.py` runs as a standalone worker process. Its only job
-is to consume label jobs and publish the corresponding Bluesky labels. One
-publisher should be used initially. Additional publisher workers may share the
-queue if measured queue lag shows that one cannot keep up.
+is to consume label jobs and publish the corresponding Bluesky labels. The
+coordinator assigns publisher workers round-robin across label shards; adding
+workers gives each shard more competing consumers when measured queue lag calls
+for more capacity.
 
 Labels are published with both the post AT URI and CID. The CID scopes the label
 to the exact post version that was classified. If the post is later updated,
@@ -256,14 +268,11 @@ updates an in-memory aggregate snapshot; HTTP request threads only read the
 last completed snapshot and never query SQLite or acquire a queue lock. A slow
 or failed refresh therefore leaves the last good snapshot immediately
 available, together with its age and refresh status. A coordinator-managed HTTP
-gateway serves that snapshot from a loopback port. The coordinator also starts
-an outbound Cloudflare Quick Tunnel and registers its temporary HTTPS URL in
-`docs/metrics-endpoint.json` on the isolated
-`live-metrics-endpoint-registry` branch. The
-dashboard waits for an active registration and then polls the live endpoint
-once per second. Browser requests are single-flight and time-bounded; a local
-watchdog visibly reports delayed or stale telemetry while reconnecting. Metric
-values are never committed and the frontend is not redeployed when they change.
+gateway serves both that snapshot and the dashboard assets from a loopback port.
+The dashboard polls the same origin once per second. Browser requests are
+single-flight and time-bounded; a local watchdog visibly reports delayed or
+stale telemetry while reconnecting. Metric values are never written into the
+dashboard assets.
 
 The gateway calculates displayed throughput from lifetime-counter deltas over
 a short in-memory window. This keeps the dashboard responsive without adding
@@ -286,16 +295,17 @@ timestamp is checkpointed with stream health, allowing the dashboard to show
 `Up to date`, `Catching up`, or `Disconnected` from measured cursor lag. Thus a
 low arrival rate can be distinguished from a reader that is falling behind.
 
-The local HTTP bind is exclusive. Cross-machine exclusivity is enforced with a
-GitHub Contents API compare-and-swap lease: only the coordinator that updates
-the registry from the observed file SHA owns the public endpoint. A second
-coordinator must refuse to run while the registry is `starting` or `active`.
-Forced replacement exists only for recovery from an ungraceful shutdown after
-an operator verifies the recorded owner is no longer running.
+The local HTTP bind is exclusive, so a second coordinator cannot claim the same
+dashboard address. The server enables address reuse only so a cleanly stopped
+gateway can restart while old TCP connections are in `TIME_WAIT`; an active
+listener still owns the port exclusively. There is no cross-machine lease
+because the dashboard is not published or shared across machines.
 
 The dashboard displays:
 
 - the current tags or label values that classify a post as a spoiler;
+- configured and currently busy detector and publisher workers;
+- worker utilization, average queue wait, and average SQLite claim time;
 - ingestion rate: accepted post-create jobs enqueued per unit of time;
 - label rate: positive spoiler classifications enqueued per unit of time;
 - publish rate: labels successfully published per unit of time;
@@ -320,10 +330,9 @@ the active spoiler tags or any runtime configuration.
 8. The publisher acknowledges the job after publication succeeds.
 9. Every stage asynchronously reports counters, errors, and queue health to the
    metrics collector.
-10. The metrics gateway serves aggregate snapshots through its outbound HTTPS
-    tunnel.
-11. The GitHub Pages dashboard discovers the leased endpoint and polls live
-    values without another Pages deployment.
+10. The metrics gateway serves the local dashboard and aggregate snapshots on
+    one HTTP origin.
+11. The dashboard polls live values from `/metrics` on that origin.
 
 ## Architectural Rules
 
@@ -341,6 +350,8 @@ the active spoiler tags or any runtime configuration.
   idempotent.
 - Each interface owns its SQLite schema and is the only supported route for
   accessing that database.
+- Post jobs are routed deterministically across the configured SQLite shards;
+  each shard must have at least one detector worker.
 - SQLite databases reside on local disk and are not shared over a network
   filesystem.
 - Database ownership does not require a single interface process; worker
@@ -348,14 +359,11 @@ the active spoiler tags or any runtime configuration.
   adapter.
 - Updates and deletes are intentionally outside the processing pipeline.
 - Metrics collection must never block the processing pipeline.
-- The public metrics snapshot contains aggregate operational data only and
+- The metrics snapshot contains aggregate operational data only and
   exposes no secrets, post contents, user identifiers, or write operations.
-- GitHub Pages may read only the aggregate `/metrics` endpoint through the
-  outbound tunnel. SQLite files and coordinator control interfaces remain
-  private and the local HTTP server listens only on loopback.
-- For the demo, the GitHub write token is embedded in the metrics gateway and
-  limited to repository Contents write access. It is used for endpoint
-  discovery and exclusive leasing, not metric delivery.
+- The local dashboard may read only the aggregate `/metrics` endpoint. SQLite
+  files and coordinator control interfaces remain private, and the HTTP server
+  listens only on loopback by default.
 - Buffering, storage, and transport details stay behind the interfaces so they
   can change without affecting consumers.
 - Data passed across a boundary should use an explicit, shared contract rather
@@ -370,7 +378,5 @@ the active spoiler tags or any runtime configuration.
 - Choose the persistent idempotency key for publication, likely the combination
   of post URI, CID, and label value.
 - Define how completed or failed label publications are recorded.
-- Provision the `cloudflared` executable on each machine permitted to run the
-  coordinator.
 - Establish measured SQLite queue-depth, lock-wait, and write-latency thresholds
   that would trigger migration to an external queue broker.

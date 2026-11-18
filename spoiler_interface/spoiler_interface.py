@@ -5,12 +5,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from pathlib import Path
 import queue
+import shutil
 import sqlite3
 import threading
 import time
-from typing import Iterator
+from typing import Iterator, Sequence
+from uuid import uuid4
 
 from Bluesky_interface.post_fetcher_interface import ClaimedPost, PostQueue
 
@@ -139,10 +142,28 @@ class LabelQueue:
                     enqueued INTEGER NOT NULL DEFAULT 0,
                     published INTEGER NOT NULL DEFAULT 0,
                     retried INTEGER NOT NULL DEFAULT 0,
-                    dead_lettered INTEGER NOT NULL DEFAULT 0
+                    dead_lettered INTEGER NOT NULL DEFAULT 0,
+                    claimed INTEGER NOT NULL DEFAULT 0,
+                    claim_wait_seconds REAL NOT NULL DEFAULT 0,
+                    claim_transactions INTEGER NOT NULL DEFAULT 0,
+                    claim_db_seconds REAL NOT NULL DEFAULT 0
                 );
                 """
             )
+            metric_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(label_metric_buckets)")
+            }
+            for column, definition in (
+                ("claimed", "INTEGER NOT NULL DEFAULT 0"),
+                ("claim_wait_seconds", "REAL NOT NULL DEFAULT 0"),
+                ("claim_transactions", "INTEGER NOT NULL DEFAULT 0"),
+                ("claim_db_seconds", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if column not in metric_columns:
+                    connection.execute(
+                        f"ALTER TABLE label_metric_buckets ADD COLUMN {column} {definition}"
+                    )
 
     @staticmethod
     def _begin(connection: sqlite3.Connection) -> None:
@@ -219,6 +240,7 @@ class LabelQueue:
             raise ValueError("limit must be positive")
         timestamp = time.time() if now is None else now
         lease_until = timestamp + lease_seconds
+        claim_started = time.perf_counter()
         with self._connect() as connection:
             self._begin(connection)
             try:
@@ -250,6 +272,27 @@ class LabelQueue:
                         "ORDER BY detected_at, job_id",
                         job_ids,
                     ).fetchall()
+                    wait_seconds = sum(
+                        max(0.0, timestamp - float(row["enqueued_at"])) for row in rows
+                    )
+                    claim_seconds = time.perf_counter() - claim_started
+                    bucket = int(timestamp // 60) * 60
+                    connection.execute(
+                        """
+                        INSERT INTO label_metric_buckets(
+                            bucket, claimed, claim_wait_seconds,
+                            claim_transactions, claim_db_seconds
+                        ) VALUES (?, ?, ?, 1, ?)
+                        ON CONFLICT(bucket) DO UPDATE SET
+                            claimed = claimed + excluded.claimed,
+                            claim_wait_seconds = claim_wait_seconds
+                                + excluded.claim_wait_seconds,
+                            claim_transactions = claim_transactions + 1,
+                            claim_db_seconds = claim_db_seconds
+                                + excluded.claim_db_seconds
+                        """,
+                        (bucket, len(rows), wait_seconds, claim_seconds),
+                    )
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -369,7 +412,8 @@ class LabelQueue:
             ).fetchone()
             leased_row = connection.execute(
                 """
-                SELECT COUNT(*) AS leased
+                SELECT COUNT(*) AS leased,
+                       COUNT(DISTINCT leased_by) AS busy_workers
                 FROM label_jobs
                 WHERE status = 'leased' AND lease_until > ?
                 """,
@@ -385,7 +429,11 @@ class LabelQueue:
                 """
                 SELECT COALESCE(SUM(enqueued), 0) AS enqueued,
                        COALESCE(SUM(published), 0) AS published,
-                       COALESCE(SUM(retried), 0) AS retried
+                       COALESCE(SUM(retried), 0) AS retried,
+                       COALESCE(SUM(claimed), 0) AS claimed,
+                       COALESCE(SUM(claim_wait_seconds), 0) AS claim_wait_seconds,
+                       COALESCE(SUM(claim_transactions), 0) AS claim_transactions,
+                       COALESCE(SUM(claim_db_seconds), 0) AS claim_db_seconds
                 FROM label_metric_buckets WHERE bucket >= ?
                 """,
                 (first_bucket,),
@@ -395,15 +443,32 @@ class LabelQueue:
         dead = int(totals["dead_lettered"])
         depth = max(0, int(totals["enqueued"]) - int(totals["published"]) - dead)
         leased = min(depth, int(leased_row["leased"] or 0))
+        claimed = int(rates["claimed"] or 0)
+        claim_transactions = int(rates["claim_transactions"] or 0)
         oldest = oldest_row["oldest"]
         return {
             "available": depth - leased,
             "leased": leased,
+            "busy_workers": int(leased_row["busy_workers"] or 0),
             "dead": dead,
             "oldest_job_age_seconds": None if oldest is None else max(0.0, timestamp - float(oldest)),
             "enqueued_rate_per_second": float(rates["enqueued"]) / window_seconds,
             "publish_rate_per_second": float(rates["published"]) / window_seconds,
             "retry_rate_per_second": float(rates["retried"]) / window_seconds,
+            "average_queue_wait_seconds": (
+                None
+                if claimed == 0
+                else float(rates["claim_wait_seconds"]) / claimed
+            ),
+            "average_claim_seconds": (
+                None
+                if claim_transactions == 0
+                else float(rates["claim_db_seconds"]) / claim_transactions
+            ),
+            "recent_claimed": claimed,
+            "recent_claim_wait_seconds": float(rates["claim_wait_seconds"]),
+            "recent_claim_transactions": claim_transactions,
+            "recent_claim_db_seconds": float(rates["claim_db_seconds"]),
             "enqueued_total": int(totals["enqueued"]),
             "published_total": int(totals["published"]),
             "retried_total": int(totals["retried"]),
@@ -420,6 +485,378 @@ class LabelQueue:
             detected_at=float(row["detected_at"]),
             detector_version=row["detector_version"],
         )
+
+
+def _label_shard_manifest_path(database: Path) -> Path:
+    return database.with_name(f"{database.name}.shards.json")
+
+
+def _label_shard_root(database: Path) -> Path:
+    return database.with_name(f"{database.name}.shards")
+
+
+def _load_label_shard_manifest(database: Path) -> dict[str, object] | None:
+    manifest_path = _label_shard_manifest_path(database)
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError(f"invalid label-shard manifest: {manifest_path}")
+    raw_paths = payload.get("paths")
+    if not isinstance(raw_paths, list) or not all(
+        isinstance(path, str) for path in raw_paths
+    ):
+        raise RuntimeError(f"invalid label-shard paths in manifest: {manifest_path}")
+    paths = [database.parent / str(path) for path in raw_paths]
+    if not paths or any(not path.is_file() for path in paths):
+        raise RuntimeError(
+            f"label-shard manifest references missing databases: {manifest_path}"
+        )
+    return {**payload, "resolved_paths": paths}
+
+
+def configured_label_shard_paths(database: str | Path, shard_count: int) -> list[Path]:
+    """Return active label shards, or placeholders before startup rectification."""
+    if shard_count < 1:
+        raise ValueError("label shard count must be positive")
+    base = Path(database)
+    manifest = _load_label_shard_manifest(base)
+    if manifest is not None and int(manifest.get("shard_count", 0)) == shard_count:
+        return list(manifest["resolved_paths"])  # type: ignore[arg-type]
+    return [
+        _label_shard_root(base) / "pending" / f"shard-{index:03d}.sqlite3"
+        for index in range(shard_count)
+    ]
+
+
+def _remove_label_sqlite_database(path: Path) -> None:
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def rectify_label_shards(database: str | Path, shard_count: int) -> list[Path]:
+    """Atomically migrate label backlog and publication history into shards."""
+    if shard_count < 1:
+        raise ValueError("label shard count must be positive")
+    base = Path(database)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    root = _label_shard_root(base)
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = _load_label_shard_manifest(base)
+    active_paths = (
+        [] if manifest is None else list(manifest["resolved_paths"])  # type: ignore[arg-type]
+    )
+
+    for candidate in root.iterdir():
+        if candidate.is_dir() and candidate.name.startswith(".building-"):
+            shutil.rmtree(candidate)
+
+    if (
+        manifest is not None
+        and int(manifest.get("shard_count", 0)) == shard_count
+        and not base.exists()
+    ):
+        active_parent = active_paths[0].parent
+        for candidate in root.iterdir():
+            if candidate.is_dir() and candidate != active_parent:
+                shutil.rmtree(candidate)
+        return active_paths
+
+    sources = active_paths if active_paths else ([base] if base.is_file() else [])
+    generation_id = uuid4().hex
+    building = root / f".building-{generation_id}"
+    final_generation = root / f"generation-{generation_id}"
+    building.mkdir()
+    building_paths = [
+        building / f"shard-{index:03d}.sqlite3" for index in range(shard_count)
+    ]
+    for path in building_paths:
+        LabelQueue(path)
+
+    target_connections: list[sqlite3.Connection] = []
+    totals = {"enqueued": 0, "published": 0, "retried": 0, "dead_lettered": 0}
+    bucket_totals: dict[int, dict[str, float]] = {}
+    active_jobs = [0] * shard_count
+    dead_jobs = [0] * shard_count
+    published_jobs = [0] * shard_count
+    metric_names = (
+        "enqueued", "published", "retried", "dead_lettered", "claimed",
+        "claim_wait_seconds", "claim_transactions", "claim_db_seconds",
+    )
+    try:
+        for path in building_paths:
+            connection = sqlite3.connect(path, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN IMMEDIATE")
+            target_connections.append(connection)
+
+        for source_path in sources:
+            with sqlite3.connect(source_path) as source:
+                source.row_factory = sqlite3.Row
+                source.execute("BEGIN IMMEDIATE")
+                for row in source.execute("SELECT * FROM label_jobs"):
+                    shard_index = int(str(row["job_id"])[:16], 16) % shard_count
+                    status = str(row["status"])
+                    if status == "leased":
+                        status = "pending"
+                    target_connections[shard_index].execute(
+                        """
+                        INSERT OR IGNORE INTO label_jobs(
+                            job_id, post_uri, post_cid, label_value, detected_at,
+                            detector_version, enqueued_at, status, available_at,
+                            lease_until, leased_by, attempt_count, last_error
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row["job_id"], row["post_uri"], row["post_cid"],
+                            row["label_value"], row["detected_at"],
+                            row["detector_version"], row["enqueued_at"], status,
+                            min(float(row["available_at"]), time.time())
+                            if row["status"] == "leased" else row["available_at"],
+                            None if row["status"] == "leased" else row["lease_until"],
+                            None if row["status"] == "leased" else row["leased_by"],
+                            row["attempt_count"], row["last_error"],
+                        ),
+                    )
+                    if status == "dead":
+                        dead_jobs[shard_index] += 1
+                    else:
+                        active_jobs[shard_index] += 1
+
+                for row in source.execute("SELECT * FROM published_labels"):
+                    shard_index = int(str(row["job_id"])[:16], 16) % shard_count
+                    target_connections[shard_index].execute(
+                        """
+                        INSERT OR IGNORE INTO published_labels(
+                            job_id, post_uri, post_cid, label_value, published_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row["job_id"], row["post_uri"], row["post_cid"],
+                            row["label_value"], row["published_at"],
+                        ),
+                    )
+                    published_jobs[shard_index] += 1
+
+                row = source.execute(
+                    "SELECT * FROM label_queue_totals WHERE singleton = 1"
+                ).fetchone()
+                if row is not None:
+                    for name in totals:
+                        totals[name] += int(row[name])
+
+                available_metric_columns = {
+                    str(row["name"])
+                    for row in source.execute("PRAGMA table_info(label_metric_buckets)")
+                }
+                select_metrics = ", ".join(
+                    name if name in available_metric_columns else f"0 AS {name}"
+                    for name in metric_names
+                )
+                for row in source.execute(
+                    f"SELECT bucket, {select_metrics} FROM label_metric_buckets"
+                ):
+                    bucket = int(row["bucket"])
+                    aggregate = bucket_totals.setdefault(
+                        bucket, {name: 0.0 for name in metric_names}
+                    )
+                    for name in metric_names:
+                        aggregate[name] += float(row[name])
+
+        historical_dead = totals["dead_lettered"]
+        if historical_dead > sum(dead_jobs):
+            dead_jobs[0] += historical_dead - sum(dead_jobs)
+        published_total = totals["published"]
+        if published_total > sum(published_jobs):
+            published_jobs[0] += published_total - sum(published_jobs)
+        enqueued_by_shard = [
+            active_jobs[index] + dead_jobs[index] + published_jobs[index]
+            for index in range(shard_count)
+        ]
+        residual_enqueued = totals["enqueued"] - sum(enqueued_by_shard)
+        if residual_enqueued > 0:
+            enqueued_by_shard[0] += residual_enqueued
+
+        for index, connection in enumerate(target_connections):
+            connection.execute(
+                """
+                UPDATE label_queue_totals SET
+                    enqueued = ?, published = ?, retried = ?, dead_lettered = ?
+                WHERE singleton = 1
+                """,
+                (
+                    enqueued_by_shard[index], published_jobs[index],
+                    totals["retried"] if index == 0 else 0, dead_jobs[index],
+                ),
+            )
+
+        control = target_connections[0]
+        for bucket, values in bucket_totals.items():
+            control.execute(
+                """
+                INSERT INTO label_metric_buckets(
+                    bucket, enqueued, published, retried, dead_lettered,
+                    claimed, claim_wait_seconds, claim_transactions,
+                    claim_db_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (bucket, *(values[name] for name in metric_names)),
+            )
+        for connection in target_connections:
+            connection.commit()
+            connection.close()
+        target_connections.clear()
+    except BaseException:
+        for connection in target_connections:
+            connection.rollback()
+            connection.close()
+        shutil.rmtree(building, ignore_errors=True)
+        raise
+
+    building.rename(final_generation)
+    final_paths = [final_generation / path.name for path in building_paths]
+    manifest_payload = {
+        "version": 1,
+        "shard_count": shard_count,
+        "paths": [str(path.relative_to(base.parent)) for path in final_paths],
+    }
+    manifest_path = _label_shard_manifest_path(base)
+    temporary_manifest = manifest_path.with_name(
+        f".{manifest_path.name}.{generation_id}.tmp"
+    )
+    temporary_manifest.write_text(
+        json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_manifest.replace(manifest_path)
+
+    if base.is_file():
+        _remove_label_sqlite_database(base)
+    old_parents = {path.parent for path in active_paths}
+    for old_parent in old_parents:
+        if old_parent != final_generation and old_parent.parent == root:
+            shutil.rmtree(old_parent, ignore_errors=True)
+    for candidate in root.iterdir():
+        if candidate.is_dir() and candidate != final_generation:
+            shutil.rmtree(candidate, ignore_errors=True)
+    return final_paths
+
+
+class ShardedLabelQueue:
+    """Label-queue facade that routes writes and aggregates shard metrics."""
+
+    def __init__(self, databases: Sequence[str | Path], *, migrate: bool = True):
+        if not databases:
+            raise ValueError("at least one label database shard is required")
+        self.shards = [LabelQueue(path, migrate=migrate) for path in databases]
+
+    def _shard_for_job_id(self, job_id: str) -> LabelQueue:
+        return self.shards[int(job_id[:16], 16) % len(self.shards)]
+
+    def enqueue(self, job: LabelJob, *, now: float | None = None) -> bool:
+        return self._shard_for_job_id(job.job_id).enqueue(job, now=now)
+
+    def claim(
+        self,
+        worker_id: str,
+        *,
+        limit: int = 1,
+        lease_seconds: float = 60.0,
+        now: float | None = None,
+    ) -> list[ClaimedLabel]:
+        deliveries: list[ClaimedLabel] = []
+        for shard in self.shards:
+            if len(deliveries) >= limit:
+                break
+            deliveries.extend(
+                shard.claim(
+                    worker_id,
+                    limit=limit - len(deliveries),
+                    lease_seconds=lease_seconds,
+                    now=now,
+                )
+            )
+        return deliveries
+
+    def acknowledge(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        return self._shard_for_job_id(job_id).acknowledge(job_id, worker_id, now=now)
+
+    def retry(
+        self,
+        job_id: str,
+        worker_id: str,
+        error: str,
+        *,
+        delay_seconds: float = 5.0,
+        max_attempts: int = 5,
+        now: float | None = None,
+    ) -> bool:
+        return self._shard_for_job_id(job_id).retry(
+            job_id,
+            worker_id,
+            error,
+            delay_seconds=delay_seconds,
+            max_attempts=max_attempts,
+            now=now,
+        )
+
+    def metrics(
+        self,
+        *,
+        window_seconds: int = 60,
+        now: float | None = None,
+    ) -> dict[str, float | int | None]:
+        snapshots = [
+            shard.metrics(window_seconds=window_seconds, now=now)
+            for shard in self.shards
+        ]
+        sums = (
+            "available", "leased", "busy_workers", "dead",
+            "enqueued_rate_per_second", "publish_rate_per_second",
+            "retry_rate_per_second", "recent_claimed",
+            "recent_claim_wait_seconds", "recent_claim_transactions",
+            "recent_claim_db_seconds", "enqueued_total", "published_total",
+            "retried_total", "dead_lettered_total",
+        )
+        result: dict[str, float | int | None] = {
+            name: sum(float(snapshot[name] or 0) for snapshot in snapshots)
+            for name in sums
+        }
+        for name in (
+            "available", "leased", "busy_workers", "dead", "recent_claimed",
+            "recent_claim_transactions", "enqueued_total", "published_total",
+            "retried_total", "dead_lettered_total",
+        ):
+            result[name] = int(result[name] or 0)
+        claimed = int(result["recent_claimed"] or 0)
+        transactions = int(result["recent_claim_transactions"] or 0)
+        result["average_queue_wait_seconds"] = (
+            None
+            if claimed == 0
+            else float(result["recent_claim_wait_seconds"] or 0) / claimed
+        )
+        result["average_claim_seconds"] = (
+            None
+            if transactions == 0
+            else float(result["recent_claim_db_seconds"] or 0) / transactions
+        )
+        ages = [
+            float(snapshot["oldest_job_age_seconds"])
+            for snapshot in snapshots
+            if snapshot["oldest_job_age_seconds"] is not None
+        ]
+        result["oldest_job_age_seconds"] = None if not ages else max(ages)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,7 +899,7 @@ class SpoilerWorkerInterface:
     def __init__(
         self,
         post_queue: PostQueue,
-        label_queue: LabelQueue,
+        label_queue: LabelQueue | ShardedLabelQueue,
         worker_id: str,
         *,
         label_value: str,
