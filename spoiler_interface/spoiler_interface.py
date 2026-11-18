@@ -53,11 +53,18 @@ class LabelQueue:
 
     _METRIC_COLUMNS = {"enqueued", "published", "retried", "dead_lettered"}
 
-    def __init__(self, database: str | Path, *, busy_timeout: float = 5.0):
+    def __init__(
+        self,
+        database: str | Path,
+        *,
+        busy_timeout: float = 5.0,
+        migrate: bool = True,
+    ):
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self.busy_timeout = busy_timeout
-        self._migrate()
+        if migrate:
+            self._migrate()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -100,6 +107,9 @@ class LabelQueue:
 
                 CREATE INDEX IF NOT EXISTS label_jobs_claimable
                     ON label_jobs(status, available_at, lease_until, detected_at);
+
+                CREATE INDEX IF NOT EXISTS label_jobs_active_age
+                    ON label_jobs(enqueued_at) WHERE status != 'dead';
 
                 CREATE TABLE IF NOT EXISTS published_labels (
                     job_id TEXT PRIMARY KEY,
@@ -349,17 +359,23 @@ class LabelQueue:
         timestamp = time.time() if now is None else now
         first_bucket = int((timestamp - window_seconds) // 60) * 60
         with self._connect() as connection:
-            counts = connection.execute(
+            connection.execute("BEGIN")
+            totals = connection.execute(
+                "SELECT * FROM label_queue_totals WHERE singleton = 1"
+            ).fetchone()
+            leased_row = connection.execute(
                 """
-                SELECT
-                    SUM(CASE WHEN status = 'pending' OR (status = 'leased' AND lease_until <= ?)
-                        THEN 1 ELSE 0 END) AS available,
-                    SUM(CASE WHEN status = 'leased' AND lease_until > ? THEN 1 ELSE 0 END) AS leased,
-                    SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) AS dead,
-                    MIN(CASE WHEN status != 'dead' THEN enqueued_at END) AS oldest
+                SELECT COUNT(*) AS leased
                 FROM label_jobs
+                WHERE status = 'leased' AND lease_until > ?
                 """,
-                (timestamp, timestamp),
+                (timestamp,),
+            ).fetchone()
+            oldest_row = connection.execute(
+                """
+                SELECT MIN(enqueued_at) AS oldest
+                FROM label_jobs WHERE status != 'dead'
+                """
             ).fetchone()
             rates = connection.execute(
                 """
@@ -370,15 +386,16 @@ class LabelQueue:
                 """,
                 (first_bucket,),
             ).fetchone()
-            totals = connection.execute(
-                "SELECT * FROM label_queue_totals WHERE singleton = 1"
-            ).fetchone()
+            connection.commit()
 
-        oldest = counts["oldest"]
+        dead = int(totals["dead_lettered"])
+        depth = max(0, int(totals["enqueued"]) - int(totals["published"]) - dead)
+        leased = min(depth, int(leased_row["leased"] or 0))
+        oldest = oldest_row["oldest"]
         return {
-            "available": int(counts["available"] or 0),
-            "leased": int(counts["leased"] or 0),
-            "dead": int(counts["dead"] or 0),
+            "available": depth - leased,
+            "leased": leased,
+            "dead": dead,
             "oldest_job_age_seconds": None if oldest is None else max(0.0, timestamp - float(oldest)),
             "enqueued_rate_per_second": float(rates["enqueued"]) / window_seconds,
             "publish_rate_per_second": float(rates["published"]) / window_seconds,

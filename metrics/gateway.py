@@ -229,8 +229,8 @@ class SnapshotProvider:
         caught_up_lag_seconds: float = 10.0,
         minimum_refresh_seconds: float = 0.5,
     ):
-        self.post_queue = PostQueue(post_database)
-        self.label_queue = LabelQueue(label_database)
+        self.post_queue = PostQueue(post_database, migrate=False)
+        self.label_queue = LabelQueue(label_database, migrate=False)
         self.tag_config = tag_config
         self.window_seconds = window_seconds
         self.caught_up_lag_seconds = caught_up_lag_seconds
@@ -517,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config/spoiler_tags.json"))
     parser.add_argument("--repository", required=True)
     parser.add_argument("--registry-path", default="docs/metrics-endpoint.json")
-    parser.add_argument("--registry-branch", default="metrics-runtime")
+    parser.add_argument("--registry-branch", default="live-metrics-endpoint-registry")
     parser.add_argument("--registry-source-branch", default="main")
     parser.add_argument("--token-env", default="GITHUB_METRICS_TOKEN")
     parser.add_argument("--host", default="127.0.0.1")

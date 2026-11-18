@@ -88,6 +88,17 @@ def test_post_queue_migrates_existing_stream_health_for_source_lag(tmp_path: Pat
     assert "source_event_at" in columns
 
 
+def test_metrics_adapters_can_open_without_schema_writes(tmp_path: Path) -> None:
+    post_database = tmp_path / "posts.sqlite3"
+    label_database = tmp_path / "labels.sqlite3"
+
+    PostQueue(post_database, migrate=False)
+    LabelQueue(label_database, migrate=False)
+
+    assert not post_database.exists()
+    assert not label_database.exists()
+
+
 def test_reader_accepts_only_post_creates_and_checkpoints_every_event(tmp_path: Path) -> None:
     queue = PostQueue(tmp_path / "posts.sqlite3")
     reader = PostReader(queue, "jetstream-test")
@@ -258,7 +269,7 @@ def test_metrics_registry_lease_uses_compare_and_swap() -> None:
 
     def opener(request, *, timeout):
         requests.append((request, timeout))
-        if "/git/refs/heads/metrics-runtime" in request.full_url:
+        if "/git/refs/heads/live-metrics-endpoint-registry" in request.full_url:
             return BytesIO(b'{"object":{"sha":"branch-sha"}}')
         if request.method == "GET":
             encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
@@ -268,7 +279,7 @@ def test_metrics_registry_lease_uses_compare_and_swap() -> None:
     registry = GitHubEndpointRegistry(
         repository="owner/repository",
         path="docs/metrics-endpoint.json",
-        branch="metrics-runtime",
+        branch="live-metrics-endpoint-registry",
         source_branch="main",
         token="secret",
         opener=opener,
@@ -290,7 +301,7 @@ def test_metrics_registry_refuses_an_active_owner() -> None:
     }
 
     def opener(request, *, timeout):
-        if "/git/refs/heads/metrics-runtime" in request.full_url:
+        if "/git/refs/heads/live-metrics-endpoint-registry" in request.full_url:
             return BytesIO(b'{"object":{"sha":"branch-sha"}}')
         encoded = base64.b64encode(json.dumps(endpoint).encode()).decode()
         return BytesIO(json.dumps({"sha": "old-sha", "content": encoded}).encode())
@@ -298,7 +309,7 @@ def test_metrics_registry_refuses_an_active_owner() -> None:
     registry = GitHubEndpointRegistry(
         repository="owner/repository",
         path="docs/metrics-endpoint.json",
-        branch="metrics-runtime",
+        branch="live-metrics-endpoint-registry",
         source_branch="main",
         token="secret",
         opener=opener,
@@ -392,7 +403,7 @@ def test_coordinator_runs_exclusive_live_metrics_gateway() -> None:
 
     assert pipeline["metrics"]["repository"] == "CSE210-Team05/Bluesky-SpoilerDetection"
     assert pipeline["metrics"]["registry_path"] == "docs/metrics-endpoint.json"
-    assert pipeline["metrics"]["registry_branch"] == "metrics-runtime"
+    assert pipeline["metrics"]["registry_branch"] == "live-metrics-endpoint-registry"
     assert pipeline["metrics"]["token_env"] == "GITHUB_METRICS_TOKEN"
     assert "metrics.gateway" in metrics.command
     assert metrics.critical
@@ -410,11 +421,11 @@ def test_dashboard_waits_for_gateway_then_polls_live_metrics() -> None:
 
     assert (
         "https://raw.githubusercontent.com/CSE210-Team05/"
-        "Bluesky-SpoilerDetection/metrics-runtime/docs/metrics-endpoint.json"
+        "Bluesky-SpoilerDetection/live-metrics-endpoint-registry/docs/metrics-endpoint.json"
     ) in app
     assert 'metricsSource = `${endpoint.public_url.replace(/\\/$/, "")}/metrics`' in app
     assert "window.setInterval(refresh, 1_000)" in app
-    assert 'src="app.js?v=4"' in index
+    assert 'src="app.js?v=5"' in index
     assert "Up to date" in app
     assert "Catching up" in app
     assert '"docs/**"' not in workflow

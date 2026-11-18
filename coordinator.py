@@ -91,7 +91,7 @@ def build_component_specs(
             "--registry-path",
             str(metrics.get("registry_path", "docs/metrics-endpoint.json")),
             "--registry-branch",
-            str(metrics.get("registry_branch", "metrics-runtime")),
+            str(metrics.get("registry_branch", "live-metrics-endpoint-registry")),
             "--registry-source-branch",
             str(metrics.get("registry_source_branch", "main")),
             "--token-env",

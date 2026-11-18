@@ -120,8 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     snapshot = build_snapshot(
-        PostQueue(args.post_database),
-        LabelQueue(args.label_database),
+        PostQueue(args.post_database, migrate=False),
+        LabelQueue(args.label_database, migrate=False),
         args.config,
         window_seconds=args.window_seconds,
         caught_up_lag_seconds=args.caught_up_lag_seconds,

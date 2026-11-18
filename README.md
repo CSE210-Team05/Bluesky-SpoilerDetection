@@ -56,7 +56,8 @@ Configure GitHub Pages to publish from `docs/`. The dashboard remains a static
 site, but its JavaScript discovers the active coordinator and reads live
 snapshots from its metrics gateway once per second. The coordinator binds a
 loopback-only HTTP server, starts an outbound Cloudflare Quick Tunnel, and
-registers that temporary HTTPS URL on the `metrics-runtime` branch. Metric
+registers that temporary HTTPS URL on the `live-metrics-endpoint-registry`
+branch. Metric
 values are never committed to GitHub and do not cause Pages deployments.
 
 Install `cloudflared` once on each machine that may run the coordinator. On
@@ -87,7 +88,7 @@ a fallback, but the Actions source is the intended deployment mode.
 
 Create a fine-grained token limited to this repository with **Contents: write**
 permission. Store it only on the pipeline machine. The gateway uses it to
-create the `metrics-runtime` branch and atomically claim the single active
+create the `live-metrics-endpoint-registry` branch and atomically claim the single active
 endpoint; it is not used for publishing metric snapshots:
 
 ```shell
@@ -100,7 +101,7 @@ origin, and rate window are configured in `config/pipeline.json`:
 ```json
 "metrics": {
   "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
-  "registry_branch": "metrics-runtime",
+  "registry_branch": "live-metrics-endpoint-registry",
   "registry_path": "docs/metrics-endpoint.json",
   "token_env": "GITHUB_METRICS_TOKEN",
   "host": "127.0.0.1",

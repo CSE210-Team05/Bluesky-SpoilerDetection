@@ -78,11 +78,18 @@ class PostQueue:
         "dead_lettered",
     }
 
-    def __init__(self, database: str | Path, *, busy_timeout: float = 5.0):
+    def __init__(
+        self,
+        database: str | Path,
+        *,
+        busy_timeout: float = 5.0,
+        migrate: bool = True,
+    ):
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self.busy_timeout = busy_timeout
-        self._migrate()
+        if migrate:
+            self._migrate()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -128,6 +135,9 @@ class PostQueue:
 
                 CREATE INDEX IF NOT EXISTS post_jobs_claimable
                     ON post_jobs(status, available_at, lease_until, sequence);
+
+                CREATE INDEX IF NOT EXISTS post_jobs_active_age
+                    ON post_jobs(enqueued_at) WHERE status != 'dead';
 
                 CREATE TABLE IF NOT EXISTS stream_cursors (
                     stream_id TEXT PRIMARY KEY,
@@ -492,17 +502,23 @@ class PostQueue:
         timestamp = time.time() if now is None else now
         first_bucket = int((timestamp - window_seconds) // 60) * 60
         with self._connect() as connection:
-            counts = connection.execute(
+            connection.execute("BEGIN")
+            totals = connection.execute(
+                "SELECT * FROM post_queue_totals WHERE singleton = 1"
+            ).fetchone()
+            leased_row = connection.execute(
                 """
-                SELECT
-                    SUM(CASE WHEN status = 'pending' OR (status = 'leased' AND lease_until <= ?)
-                        THEN 1 ELSE 0 END) AS available,
-                    SUM(CASE WHEN status = 'leased' AND lease_until > ? THEN 1 ELSE 0 END) AS leased,
-                    SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) AS dead,
-                    MIN(CASE WHEN status != 'dead' THEN enqueued_at END) AS oldest
+                SELECT COUNT(*) AS leased
                 FROM post_jobs
+                WHERE status = 'leased' AND lease_until > ?
                 """,
-                (timestamp, timestamp),
+                (timestamp,),
+            ).fetchone()
+            oldest_row = connection.execute(
+                """
+                SELECT MIN(enqueued_at) AS oldest
+                FROM post_jobs WHERE status != 'dead'
+                """
             ).fetchone()
             rates = connection.execute(
                 """
@@ -514,18 +530,19 @@ class PostQueue:
                 """,
                 (first_bucket,),
             ).fetchone()
-            totals = connection.execute(
-                "SELECT * FROM post_queue_totals WHERE singleton = 1"
-            ).fetchone()
             stream = connection.execute(
                 "SELECT * FROM stream_health ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
+            connection.commit()
 
-        oldest = counts["oldest"]
+        dead = int(totals["dead_lettered"])
+        depth = max(0, int(totals["ingested"]) - int(totals["acknowledged"]) - dead)
+        leased = min(depth, int(leased_row["leased"] or 0))
+        oldest = oldest_row["oldest"]
         result: dict[str, float | int | bool | str | None] = {
-            "available": int(counts["available"] or 0),
-            "leased": int(counts["leased"] or 0),
-            "dead": int(counts["dead"] or 0),
+            "available": depth - leased,
+            "leased": leased,
+            "dead": dead,
             "oldest_job_age_seconds": None if oldest is None else max(0.0, timestamp - float(oldest)),
             "ingestion_rate_per_second": float(rates["ingested"]) / window_seconds,
             "label_rate_per_second": float(rates["positive"]) / window_seconds,

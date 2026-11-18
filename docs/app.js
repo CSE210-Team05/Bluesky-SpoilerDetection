@@ -1,5 +1,5 @@
 const byId = (id) => document.getElementById(id);
-const endpointRegistry = "https://raw.githubusercontent.com/CSE210-Team05/Bluesky-SpoilerDetection/metrics-runtime/docs/metrics-endpoint.json";
+const endpointRegistry = "https://raw.githubusercontent.com/CSE210-Team05/Bluesky-SpoilerDetection/live-metrics-endpoint-registry/docs/metrics-endpoint.json";
 let metricsSource = null;
 
 const formatRate = (value) => Number(value || 0).toFixed(2);

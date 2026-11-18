@@ -238,7 +238,8 @@ The collector creates small snapshots containing no credentials, post contents,
 user identifiers, or administrative controls. A coordinator-managed HTTP
 gateway serves the current snapshot from a loopback port. The coordinator also
 starts an outbound Cloudflare Quick Tunnel and registers its temporary HTTPS URL
-in `docs/metrics-endpoint.json` on the isolated `metrics-runtime` branch. The
+in `docs/metrics-endpoint.json` on the isolated
+`live-metrics-endpoint-registry` branch. The
 dashboard waits for an active registration and then polls the live endpoint
 once per second. Metric values are never committed and the frontend is not
 redeployed when they change.
@@ -248,6 +249,16 @@ a short in-memory window. This keeps the dashboard responsive without adding
 per-second metric rows or writes to either SQLite queue database. Persistent
 minute buckets remain a coarse historical record rather than the live rate
 source.
+
+Metrics readers open the existing SQLite schemas without running migrations or
+other schema statements. Schema initialization remains a coordinator startup
+responsibility, preventing dashboard and diagnostic queries from contending
+with live workers for schema locks.
+
+Queue depth is derived from constant-time lifetime counters, while leased-job
+counts and oldest active jobs use dedicated indexes. Metrics collection must
+not repeatedly scan a backlog-sized jobs table, because observability work must
+not compete with ingestion and publication for SQLite I/O.
 
 Throughput is not itself a reader-health signal. Jetstream's source event
 timestamp is checkpointed with stream health, allowing the dashboard to show

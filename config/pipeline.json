@@ -17,7 +17,7 @@
     "host": "127.0.0.1",
     "live_rate_window_seconds": 10,
     "port": 8765,
-    "registry_branch": "metrics-runtime",
+    "registry_branch": "live-metrics-endpoint-registry",
     "registry_path": "docs/metrics-endpoint.json",
     "registry_source_branch": "main",
     "repository": "CSE210-Team05/Bluesky-SpoilerDetection",
