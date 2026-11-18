@@ -61,12 +61,18 @@ function render(data) {
   const generated = new Date(data.generated_at);
   const ageSeconds = (Date.now() - generated.getTime()) / 1000;
   const stream = data.stream || {};
-  const eventAge = formatAge(stream.last_event_age_seconds);
+  const eventAge = formatAge(
+    stream.last_event_age_seconds == null
+      ? null
+      : stream.last_event_age_seconds + Math.max(0, ageSeconds),
+  );
+  const snapshotTime = generated.toLocaleTimeString();
+  const staleAfterSeconds = Math.max(120, Number(data.window_seconds || 0) + 120);
   byId("freshness").textContent = stream.connected
-    ? `Stream connected · ${eventAge}`
-    : `Stream disconnected · updated ${generated.toLocaleString()}`;
+    ? `Snapshot ${snapshotTime} · stream connected · ${eventAge}`
+    : `Snapshot ${snapshotTime} · stream disconnected`;
   byId("freshness").title = `Received ${formatInteger(stream.received_total)} events; ${formatInteger(stream.reconnect_total)} reconnects`;
-  byId("status-dot").className = `status-dot ${stream.connected && ageSeconds <= 120 ? "live" : "stale"}`;
+  byId("status-dot").className = `status-dot ${stream.connected && ageSeconds <= staleAfterSeconds ? "live" : "stale"}`;
   byId("error").hidden = true;
 }
 
