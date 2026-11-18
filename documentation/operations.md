@@ -45,10 +45,10 @@ clock time. A low rate while up to date can simply mean low incoming demand.
 Rising queue age or depth means a downstream stage is not keeping pace.
 
 The dashboard separates classifier throughput from spoiler prevalence.
-**Detection** counts every post classified per second, while **Positive labels**
-counts only posts matching a configured tag. A positive-label rate below one is
-normal when matching posts are rare; compare detection with ingestion and queue
-age to assess whether the pipeline is keeping up.
+**Detector throughput** counts every positive and negative classification
+completed per second, while **Positive labels** counts only posts matching a
+configured tag. Use detector throughput—not positive-label production—to assess
+processing capacity and compare it with ingestion and queue age.
 
 Use `Ctrl-C` for coordinated shutdown. A finite replay exits automatically
 after the reader reaches EOF and both queues drain.

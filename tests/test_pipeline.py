@@ -919,7 +919,8 @@ def test_dashboard_polls_same_origin_live_metrics() -> None:
     assert "average_claim_seconds" in app
     assert 'id="detection-rate"' in index
     assert "rates.detection_per_second" in app
-    assert "All posts classified" in index
+    assert "Detector throughput" in index
+    assert "Positive and negative classifications completed" in index
     assert "Posts matching a configured spoiler tag" in index
     assert "Up to date" in app
     assert "Catching up" in app
