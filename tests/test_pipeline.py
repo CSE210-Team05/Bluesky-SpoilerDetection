@@ -276,6 +276,7 @@ def test_metrics_are_pushed_to_github_without_pipeline_listener() -> None:
 
 def test_dashboard_polls_raw_metrics_without_redeploying() -> None:
     app = Path("docs/app.js").read_text(encoding="utf-8")
+    index = Path("docs/index.html").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
 
     assert (
@@ -283,5 +284,6 @@ def test_dashboard_polls_raw_metrics_without_redeploying() -> None:
         "Bluesky-SpoilerDetection/main/docs/metrics.json"
     ) in app
     assert "window.setInterval(refresh, 5_000)" in app
+    assert 'src="app.js?v=2"' in index
     assert '"docs/**"' not in workflow
     assert "docs/metrics.json" not in workflow
